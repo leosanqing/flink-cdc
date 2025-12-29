@@ -33,7 +33,6 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMap
 
 import java.io.IOException;
 import java.io.Serializable;
-import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.Arrays;
@@ -97,7 +96,8 @@ public class DorisRowConverter implements Serializable {
                 return (index, val) -> val.getDouble(index);
             case DATE:
                 return (index, val) ->
-                        LocalDate.ofEpochDay(val.getInt(index))
+                        val.getDate(index)
+                                .toLocalDate()
                                 .format(DorisEventSerializer.DATE_FORMATTER);
             case TIMESTAMP_WITHOUT_TIME_ZONE:
                 return (index, val) ->
@@ -116,6 +116,8 @@ public class DorisRowConverter implements Serializable {
             case TIMESTAMP_WITH_TIME_ZONE:
                 final int zonedP = ((ZonedTimestampType) type).getPrecision();
                 return (index, val) -> val.getTimestamp(index, zonedP).toTimestamp();
+            case TIME_WITHOUT_TIME_ZONE:
+                return (index, val) -> val.getTime(index).toLocalTime();
             case ARRAY:
                 return (index, val) -> convertArrayData(val.getArray(index), type);
             case MAP:

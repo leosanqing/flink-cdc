@@ -33,14 +33,10 @@ import org.apache.flink.util.TestLogger;
 
 import com.fasterxml.jackson.core.Version;
 import com.github.dockerjava.api.DockerClient;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.ClassRule;
-import org.junit.Rule;
-import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.DockerClientFactory;
@@ -48,6 +44,8 @@ import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.MountableFile;
 
@@ -62,6 +60,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -69,11 +68,9 @@ import java.util.stream.Stream;
 import static org.apache.flink.util.Preconditions.checkState;
 
 /** Test environment running job on Flink containers. */
-@RunWith(Parameterized.class)
+@Testcontainers
 public abstract class FlinkContainerTestEnvironment extends TestLogger {
     private static final Logger LOG = LoggerFactory.getLogger(FlinkContainerTestEnvironment.class);
-
-    @Parameterized.Parameter public String flinkVersion;
 
     // ------------------------------------------------------------------------------------------
     // Flink Variables
@@ -91,13 +88,15 @@ public abstract class FlinkContainerTestEnvironment extends TestLogger {
     protected static final String MYSQL_DRIVER_CLASS = "com.mysql.cj.jdbc.Driver";
     protected static final String INTER_CONTAINER_MYSQL_ALIAS = "mysql";
 
-    @ClassRule public static final Network NETWORK = Network.newNetwork();
+    protected String flinkVersion = getFlinkVersion();
 
-    @Rule public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+    public static final Network NETWORK = Network.newNetwork();
+
+    @TempDir public Path temporaryFolder;
 
     @Nullable private RestClusterClient<StandaloneClusterId> restClusterClient;
 
-    @ClassRule
+    @Container
     public static final MySqlContainer MYSQL =
             (MySqlContainer)
                     new MySqlContainer(
@@ -118,12 +117,16 @@ public abstract class FlinkContainerTestEnvironment extends TestLogger {
     private GenericContainer<?> jobManager;
     private GenericContainer<?> taskManager;
 
-    @Parameterized.Parameters(name = "flinkVersion: {0}")
-    public static List<String> getFlinkVersion() {
-        return Arrays.asList("1.16.3", "1.17.2", "1.18.1", "1.19.1", "1.20.0");
+    public static String getFlinkVersion() {
+        String flinkVersion = System.getProperty("specifiedFlinkVersion");
+        if (Objects.isNull(flinkVersion)) {
+            throw new IllegalArgumentException(
+                    "No Flink version specified to run this test. Please use -DspecifiedFlinkVersion to pass one.");
+        }
+        return flinkVersion;
     }
 
-    @Before
+    @BeforeEach
     public void before() {
         mysqlInventoryDatabase.createAndInitialize();
         jdbcJar = TestUtils.getResource(getJdbcConnectorResourceName());
@@ -153,7 +156,7 @@ public abstract class FlinkContainerTestEnvironment extends TestLogger {
         LOG.info("Containers are started.");
     }
 
-    @After
+    @AfterEach
     public void after() {
         if (restClusterClient != null) {
             restClusterClient.close();
@@ -167,7 +170,7 @@ public abstract class FlinkContainerTestEnvironment extends TestLogger {
         mysqlInventoryDatabase.dropDatabase();
     }
 
-    @AfterClass
+    @AfterAll
     public static void afterClass() {
         DockerClient dockerClient = DockerClientFactory.instance().client();
 
@@ -180,7 +183,8 @@ public abstract class FlinkContainerTestEnvironment extends TestLogger {
                             dockerClient.removeContainerCmd(container.getId()).exec();
                         });
 
-        // List all images and remove the ones that are not flink、mysql、testcontainers related.
+        // List all images and remove the ones that are not Flink, MySQL, and TestContainers
+        // related.
         dockerClient.listImagesCmd().exec().stream()
                 .filter(
                         image ->
@@ -222,7 +226,7 @@ public abstract class FlinkContainerTestEnvironment extends TestLogger {
         SQLJobSubmission job =
                 new SQLJobSubmission.SQLJobSubmissionBuilder(sqlLines).addJars(jars).build();
         final List<String> commands = new ArrayList<>();
-        Path script = temporaryFolder.newFile().toPath();
+        Path script = Files.createFile(temporaryFolder.resolve("script.sql"));
         Files.write(script, job.getSqlLines());
         jobManager.copyFileToContainer(MountableFile.forHostPath(script), "/tmp/script.sql");
         commands.add("cat /tmp/script.sql | ");
@@ -304,7 +308,10 @@ public abstract class FlinkContainerTestEnvironment extends TestLogger {
     }
 
     private String getFlinkDockerImageTag() {
-        return String.format("flink:%s-scala_2.12", flinkVersion);
+        if (System.getProperty("java.specification.version").equals("17")) {
+            return String.format("flink:%s-scala_2.12-java17", flinkVersion);
+        }
+        return String.format("flink:%s-scala_2.12-java11", flinkVersion);
     }
 
     protected String getJdbcConnectorResourceName() {

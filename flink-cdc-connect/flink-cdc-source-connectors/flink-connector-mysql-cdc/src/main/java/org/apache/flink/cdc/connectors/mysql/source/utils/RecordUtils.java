@@ -25,7 +25,11 @@ import org.apache.flink.cdc.connectors.mysql.source.split.FinishedSnapshotSplitI
 import org.apache.flink.cdc.connectors.mysql.source.split.MySqlSnapshotSplit;
 import org.apache.flink.table.types.logical.RowType;
 
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+
 import io.debezium.data.Envelope;
+import io.debezium.document.Document;
 import io.debezium.document.DocumentReader;
 import io.debezium.relational.TableId;
 import io.debezium.relational.history.HistoryRecord;
@@ -37,12 +41,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -50,6 +51,8 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static io.debezium.connector.AbstractSourceInfo.DATABASE_NAME_KEY;
@@ -105,8 +108,8 @@ public class RecordUtils {
             Struct value = (Struct) binlogRecord.value();
             if (value != null) {
                 Struct chunkKeyStruct = getStructContainsChunkKey(binlogRecord);
-                if (splitKeyRangeContains(
-                        getSplitKey(splitBoundaryType, nameAdjuster, chunkKeyStruct),
+                if (SplitKeyUtils.splitKeyRangeContains(
+                        SplitKeyUtils.getSplitKey(splitBoundaryType, nameAdjuster, chunkKeyStruct),
                         splitStart,
                         splitEnd)) {
                     boolean hasPrimaryKey = binlogRecord.key() != null;
@@ -133,8 +136,8 @@ public class RecordUtils {
                                         binlogRecord,
                                         createReadOpValue(binlogRecord, Envelope.FieldName.BEFORE),
                                         true);
-                                if (!splitKeyRangeContains(
-                                        getSplitKey(
+                                if (!SplitKeyUtils.splitKeyRangeContains(
+                                        SplitKeyUtils.getSplitKey(
                                                 splitBoundaryType, nameAdjuster, structFromAfter),
                                         splitStart,
                                         splitEnd)) {
@@ -384,18 +387,45 @@ public class RecordUtils {
         return new TableId(dbName, null, tableName);
     }
 
+    public static SourceRecord setTableId(
+            SourceRecord dataRecord, TableId originalTableId, TableId tableId) {
+        Struct value = (Struct) dataRecord.value();
+        Document historyRecordDocument;
+        try {
+            historyRecordDocument = getHistoryRecord(dataRecord).document();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+        HistoryRecord newHistoryRecord =
+                new HistoryRecord(
+                        historyRecordDocument.set(
+                                HistoryRecord.Fields.DDL_STATEMENTS,
+                                historyRecordDocument
+                                        .get(HistoryRecord.Fields.DDL_STATEMENTS)
+                                        .asString()
+                                        .replace(originalTableId.table(), tableId.table())));
+
+        Struct newSource =
+                value.getStruct(Envelope.FieldName.SOURCE)
+                        .put(DATABASE_NAME_KEY, tableId.catalog())
+                        .put(TABLE_NAME_KEY, tableId.table());
+        return dataRecord.newRecord(
+                dataRecord.topic(),
+                dataRecord.kafkaPartition(),
+                dataRecord.keySchema(),
+                dataRecord.key(),
+                dataRecord.valueSchema(),
+                value.put(Envelope.FieldName.SOURCE, newSource)
+                        .put(HISTORY_RECORD_FIELD, newHistoryRecord.toString()),
+                dataRecord.timestamp(),
+                dataRecord.headers());
+    }
+
     public static boolean isTableChangeRecord(SourceRecord dataRecord) {
         Struct value = (Struct) dataRecord.value();
         Struct source = value.getStruct(Envelope.FieldName.SOURCE);
         String tableName = source.getString(TABLE_NAME_KEY);
         return !StringUtils.isNullOrWhitespaceOnly(tableName);
-    }
-
-    public static Object[] getSplitKey(
-            RowType splitBoundaryType, SchemaNameAdjuster nameAdjuster, Struct target) {
-        // the split key field contains single field now
-        String splitFieldName = nameAdjuster.adjust(splitBoundaryType.getFieldNames().get(0));
-        return new Object[] {target.get(splitFieldName)};
     }
 
     public static BinlogOffset getBinlogPosition(SourceRecord dataRecord) {
@@ -411,70 +441,6 @@ public class RecordUtils {
         return BinlogOffset.builder().setOffsetMap(offsetStrMap).build();
     }
 
-    /** Returns the specific key contains in the split key range or not. */
-    public static boolean splitKeyRangeContains(
-            Object[] key, Object[] splitKeyStart, Object[] splitKeyEnd) {
-        // for all range
-        if (splitKeyStart == null && splitKeyEnd == null) {
-            return true;
-        }
-        // first split
-        if (splitKeyStart == null) {
-            int[] upperBoundRes = new int[key.length];
-            for (int i = 0; i < key.length; i++) {
-                upperBoundRes[i] = compareObjects(key[i], splitKeyEnd[i]);
-            }
-            return Arrays.stream(upperBoundRes).anyMatch(value -> value < 0)
-                    && Arrays.stream(upperBoundRes).allMatch(value -> value <= 0);
-        }
-        // last split
-        else if (splitKeyEnd == null) {
-            int[] lowerBoundRes = new int[key.length];
-            for (int i = 0; i < key.length; i++) {
-                lowerBoundRes[i] = compareObjects(key[i], splitKeyStart[i]);
-            }
-            return Arrays.stream(lowerBoundRes).allMatch(value -> value >= 0);
-        }
-        // other split
-        else {
-            int[] lowerBoundRes = new int[key.length];
-            int[] upperBoundRes = new int[key.length];
-            for (int i = 0; i < key.length; i++) {
-                lowerBoundRes[i] = compareObjects(key[i], splitKeyStart[i]);
-                upperBoundRes[i] = compareObjects(key[i], splitKeyEnd[i]);
-            }
-            return Arrays.stream(lowerBoundRes).anyMatch(value -> value >= 0)
-                    && (Arrays.stream(upperBoundRes).anyMatch(value -> value < 0)
-                            && Arrays.stream(upperBoundRes).allMatch(value -> value <= 0));
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static int compareObjects(Object o1, Object o2) {
-        if (o1 instanceof Comparable && o1.getClass().equals(o2.getClass())) {
-            return ((Comparable) o1).compareTo(o2);
-        } else if (isNumericObject(o1) && isNumericObject(o2)) {
-            return toBigDecimal(o1).compareTo(toBigDecimal(o2));
-        } else {
-            return o1.toString().compareTo(o2.toString());
-        }
-    }
-
-    private static boolean isNumericObject(Object obj) {
-        return obj instanceof Byte
-                || obj instanceof Short
-                || obj instanceof Integer
-                || obj instanceof Long
-                || obj instanceof Float
-                || obj instanceof Double
-                || obj instanceof BigInteger
-                || obj instanceof BigDecimal;
-    }
-
-    private static BigDecimal toBigDecimal(Object numericObj) {
-        return new BigDecimal(numericObj.toString());
-    }
-
     public static HistoryRecord getHistoryRecord(SourceRecord schemaRecord) throws IOException {
         Struct value = (Struct) schemaRecord.value();
         String historyRecordStr = value.getString(HISTORY_RECORD_FIELD);
@@ -488,5 +454,76 @@ public class RecordUtils {
             return Optional.of(WatermarkKind.valueOf(value.getString(WATERMARK_KIND)));
         }
         return Optional.empty();
+    }
+
+    /**
+     * This utility method checks if given source record is a gh-ost/pt-osc initiated schema change
+     * event by checking the "alter" ddl.
+     */
+    public static boolean isOnLineSchemaChangeEvent(SourceRecord record) {
+        if (!isSchemaChangeEvent(record)) {
+            return false;
+        }
+        Struct value = (Struct) record.value();
+        ObjectMapper mapper = new ObjectMapper();
+        try {
+            // There will be these schema change events generated in total during one transaction.
+            //
+            // gh-ost:
+            // DROP TABLE IF EXISTS `db`.`_tb1_gho`
+            // DROP TABLE IF EXISTS `db`.`_tb1_del`
+            // DROP TABLE IF EXISTS `db`.`_tb1_ghc`
+            // create /* gh-ost */ table `db`.`_tb1_ghc` ...
+            // create /* gh-ost */ table `db`.`_tb1_gho` like `db`.`tb1`
+            // alter /* gh-ost */ table `db`.`_tb1_gho` add column c varchar(255)
+            // create /* gh-ost */ table `db`.`_tb1_del` ...
+            // DROP TABLE IF EXISTS `db`.`_tb1_del`
+            // rename /* gh-ost */ table `db`.`tb1` to `db`.`_tb1_del`
+            // rename /* gh-ost */ table `db`.`_tb1_gho` to `db`.`tb1`
+            // DROP TABLE IF EXISTS `db`.`_tb1_ghc`
+            // DROP TABLE IF EXISTS `db`.`_tb1_del`
+            //
+            // pt-osc:
+            // CREATE TABLE `db`.`_test_tb1_new`
+            // ALTER TABLE `db`.`_test_tb1_new` add column c varchar(50)
+            // CREATE TRIGGER `pt_osc_db_test_tb1_del`...
+            // CREATE TRIGGER `pt_osc_db_test_tb1_upd`...
+            // CREATE TRIGGER `pt_osc_db_test_tb1_ins`...
+            // ANALYZE TABLE `db`.`_test_tb1_new` /* pt-online-schema-change */
+            // RENAME TABLE `db`.`test_tb1` TO `db`.`_test_tb1_old`, `db`.`_test_tb1_new` TO
+            // `db`.`test_tb1`
+            // DROP TABLE IF EXISTS `_test_tb1_old` /* generated by server */
+            // DROP TRIGGER IF EXISTS `db`.`pt_osc_db_test_tb1_del`
+            // DROP TRIGGER IF EXISTS `db`.`pt_osc_db_test_tb1_upd`
+            // DROP TRIGGER IF EXISTS `db`.`pt_osc_db_test_tb1_ins`
+            //
+            // Among all these, we only need the "ALTER" one that happens on the `_gho`/`_new`
+            // table.
+            String ddl =
+                    mapper.readTree(value.getString(HISTORY_RECORD_FIELD))
+                            .get(HistoryRecord.Fields.DDL_STATEMENTS)
+                            .asText()
+                            .toLowerCase();
+            if (ddl.startsWith("alter")) {
+                String tableName =
+                        value.getStruct(Envelope.FieldName.SOURCE).getString(TABLE_NAME_KEY);
+                return OSC_TABLE_ID_PATTERN.matcher(tableName).matches();
+            }
+
+            return false;
+        } catch (JsonProcessingException e) {
+            return false;
+        }
+    }
+
+    private static final Pattern OSC_TABLE_ID_PATTERN = Pattern.compile("^_(.*)_(gho|new)$");
+
+    /** This utility method peels out gh-ost/pt-osc mangled tableId to the original one. */
+    public static TableId peelTableId(TableId tableId) {
+        Matcher matchingResult = OSC_TABLE_ID_PATTERN.matcher(tableId.table());
+        if (matchingResult.matches()) {
+            return new TableId(tableId.catalog(), tableId.schema(), matchingResult.group(1));
+        }
+        return tableId;
     }
 }

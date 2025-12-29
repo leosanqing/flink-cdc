@@ -41,6 +41,7 @@ limitations under the License.
         <module>flink-cdc-runtime</module>
         <module>flink-cdc-e2e-tests</module>
         <module>flink-cdc-pipeline-udf-examples</module>
+        <module>flink-cdc-pipeline-model</module>
     </modules>
 
     <licenses>
@@ -58,19 +59,16 @@ limitations under the License.
     </scm>
 
     <properties>
-        <revision>3.3-SNAPSHOT</revision>
-        <java.version>1.8</java.version>
+        <revision>3.6-SNAPSHOT</revision>
         <scala.binary.version>2.12</scala.binary.version>
-        <maven.compiler.source>${java.version}</maven.compiler.source>
-        <maven.compiler.target>${java.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <!-- Enforce single fork execution due to heavy mini cluster use in the tests -->
         <flink.forkCount>1</flink.forkCount>
         <flink.reuseForks>true</flink.reuseForks>
 
         <!-- dependencies versions -->
-        <flink.version>1.18.1</flink.version>
-        <flink.major.version>1.18</flink.major.version>
+        <flink.version>1.20.3</flink.version>
+        <flink.major.version>1.20</flink.major.version>
         <flink.shaded.version>17.0</flink.shaded.version>
         <debezium.version>1.9.8.Final</debezium.version>
         <tikv.version>3.2.0</tikv.version>
@@ -80,12 +78,11 @@ limitations under the License.
         <version.awaitility>4.2.0</version.awaitility>
         <slf4j.version>1.7.36</slf4j.version>
         <log4j.version>2.17.1</log4j.version>
-        <spotless.version>2.4.2</spotless.version>
+        <spotless.version>2.43.0</spotless.version>
         <commons-lang3.version>3.12.0</commons-lang3.version>
         <json-path.version>2.7.0</json-path.version>
         <jackson.version>2.13.2</jackson.version>
-        <junit5.version>5.10.1</junit5.version>
-        <junit4.version>4.13.2</junit4.version>
+        <junit.version>5.10.1</junit.version>
         <assertj.version>3.24.2</assertj.version>
         <markBundledAsOptional>true</markBundledAsOptional>
         <flatten-maven-plugin.version>1.5.0</flatten-maven-plugin.version>
@@ -96,6 +93,19 @@ limitations under the License.
         <janino.version>3.1.10</janino.version>
         <!-- This is for Scala UDF testing purposes only. -->
         <scala.version>2.12.16</scala.version>
+        <!-- Maven shade plugin prior to 3.2.0 could not correctly shade nested classes with JDK 8+. -->
+        <maven.shade.plugin.version>3.6.0</maven.shade.plugin.version>
+        <iceberg.version>1.6.1</iceberg.version>
+        <hive.version>2.3.9</hive.version>
+        <hadoop.version>3.3.4</hadoop.version>
+        <java.version>11</java.version>
+        <source.java.version>11</source.java.version>
+        <target.java.version>11</target.java.version>
+        <!-- Overwrite default values from parent pom.
+             IntelliJ IDEA is (sometimes?) using those values to choose target language level
+             and thus is changing back to java 1.6 on each maven re-import -->
+        <maven.compiler.source>${source.java.version}</maven.compiler.source>
+        <maven.compiler.target>${target.java.version}</maven.compiler.target>
     </properties>
 
     <dependencyManagement>
@@ -111,15 +121,9 @@ limitations under the License.
             <dependency>
                 <groupId>org.junit</groupId>
                 <artifactId>junit-bom</artifactId>
-                <version>${junit5.version}</version>
+                <version>${junit.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
-            </dependency>
-
-            <dependency>
-                <groupId>junit</groupId>
-                <artifactId>junit</artifactId>
-                <version>${junit4.version}</version>
             </dependency>
 
             <dependency>
@@ -345,15 +349,16 @@ limitations under the License.
         </dependency>
 
         <dependency>
-            <groupId>org.junit.vintage</groupId>
-            <artifactId>junit-vintage-engine</artifactId>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
             <scope>test</scope>
         </dependency>
 
         <dependency>
-            <groupId>org.assertj</groupId>
-            <artifactId>assertj-core</artifactId>
-            <version>${assertj.version}</version>
+            <groupId>commons-codec</groupId>
+            <artifactId>commons-codec</artifactId>
+            <version>1.15</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -424,6 +429,8 @@ limitations under the License.
                     </licenseFamilies>
                     <excludes>
                         <!-- Additional files like .gitignore etc.-->
+                        <!-- Release files -->
+                        <exclude>**/release/**</exclude>
                         <exclude>**/README.md</exclude>
                         <exclude>**/.*/**</exclude>
                         <!-- Generated content -->
@@ -445,6 +452,7 @@ limitations under the License.
                         <exclude>docs/site/**</exclude>
                         <!-- Tests -->
                         <exclude>**/*.txt</exclude>
+                        <exclude>tools/mig-test/**</exclude>
                         <exclude>
                             flink-cdc-connect/flink-cdc-source-connectors/flink-connector-mysql-cdc/src/test/resources/file/*.json
                         </exclude>
@@ -465,7 +473,7 @@ limitations under the License.
                 <configuration>
                     <java>
                         <googleJavaFormat>
-                            <version>1.7</version>
+                            <version>1.8</version>
                             <style>AOSP</style>
                         </googleJavaFormat>
 
@@ -558,9 +566,18 @@ limitations under the License.
                         <forkNumber>0${surefire.forkNumber}</forkNumber>
                     </systemPropertyVariables>
                     <!-- Prevent ORA-01882: timezone region not found errors due to the Oracle DB
-                         does not understanding some time zone which used in Ubuntu OS -->
+                         does not understand some time zone which used in Ubuntu OS -->
                     <argLine>-Xms256m -Xmx2048m -Dmvn.forkNumber=${surefire.forkNumber}
                         -XX:+UseG1GC -Doracle.jdbc.timezoneAsRegion=false
+                        --add-opens=java.base/java.lang=ALL-UNNAMED
+                        --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+                        --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+                        --add-opens=java.base/java.util=ALL-UNNAMED
+                        --add-opens=java.sql/java.sql=ALL-UNNAMED
+                        --add-opens=java.base/java.nio=ALL-UNNAMED
+                        --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+                        --add-opens java.base/java.net=ALL-UNNAMED
+                        --add-exports=java.base/sun.nio.ch=ALL-UNNAMED
                     </argLine>
                 </configuration>
             </plugin>
@@ -568,6 +585,7 @@ limitations under the License.
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
+                <version>${maven.shade.plugin.version}</version>
                 <executions>
                     <execution>
                         <id>shade-flink</id>
@@ -668,6 +686,48 @@ limitations under the License.
                     </execution>
                 </executions>
             </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>${source.java.version}</source>
+                    <target>${target.java.version}</target>
+                </configuration>
+            </plugin>
+
+            <!-- Allow modification of pom.xml properties using Maven commands. -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>versions-maven-plugin</artifactId>
+                <version>2.5</version>
+                <configuration>
+                    <generateBackupPoms>false</generateBackupPoms>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce-maven</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireMavenVersion>
+                                    <!-- enforce at least mvn version 3.1.1 (see FLINK-12447) -->
+                                    <version>[3.1.1,)</version>
+                                </requireMavenVersion>
+                                <requireJavaVersion>
+                                    <version>${source.java.version}</version>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
@@ -749,6 +809,73 @@ limitations under the License.
                                 <phase>none</phase>
                             </execution>
                         </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>java-11-target</id>
+            <activation>
+                <jdk>[11,17)</jdk>
+            </activation>
+            <properties>
+                <java.version>11</java.version>
+                <maven.compiler.source>${java.version}</maven.compiler.source>
+                <maven.compiler.target>${java.version}</maven.compiler.target>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <source>11</source>
+                            <target>11</target>
+                            <compilerArgs combine.children="append">
+                                <arg>--add-exports=java.base/sun.net.util=ALL-UNNAMED</arg>
+                                <arg>--add-exports=java.management/sun.management=ALL-UNNAMED</arg>
+                                <arg>--add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED</arg>
+                                <arg>--add-exports=java.security.jgss/sun.security.krb5=ALL-UNNAMED</arg>
+                            </compilerArgs>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>java-17-target</id>
+            <activation>
+                <jdk>[17,)</jdk>
+            </activation>
+            <properties>
+                <java.version>17</java.version>
+                <maven.compiler.source>${java.version}</maven.compiler.source>
+                <maven.compiler.target>${java.version}</maven.compiler.target>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <configuration>
+                            <source>17</source>
+                            <target>17</target>
+                            <compilerArgs combine.children="append">
+                                <arg>--add-exports=java.base/sun.net.util=ALL-UNNAMED</arg>
+                                <arg>--add-exports=java.management/sun.management=ALL-UNNAMED</arg>
+                                <arg>--add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED</arg>
+                                <arg>--add-exports=java.security.jgss/sun.security.krb5=ALL-UNNAMED</arg>
+                                <arg>--add-exports=java.base/java.util=ALL-UNNAMED</arg>
+                                <arg>--add-opens</arg>
+                                <arg>java.base/java.lang=ALL-UNNAMED</arg>
+                                <arg>--add-opens</arg>
+                                <arg>java.base/java.lang.reflect=ALL-UNNAMED</arg>
+                                <arg>--add-opens</arg>
+                                <arg>java.base/java.util.concurrent=ALL-UNNAMED</arg>
+                                <arg>--add-opens</arg>
+                                <arg>java.base/java.util=ALL-UNNAMED</arg>
+                            </compilerArgs>
+                        </configuration>
                     </plugin>
                 </plugins>
             </build>

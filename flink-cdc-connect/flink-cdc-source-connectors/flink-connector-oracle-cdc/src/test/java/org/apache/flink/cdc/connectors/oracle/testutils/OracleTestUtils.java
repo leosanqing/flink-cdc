@@ -18,6 +18,7 @@
 package org.apache.flink.cdc.connectors.oracle.testutils;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.runtime.highavailability.nonha.embedded.EmbeddedHaServices;
 import org.apache.flink.runtime.highavailability.nonha.embedded.HaLeadershipControl;
 import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.table.planner.factories.TestValuesTableFactory;
@@ -61,11 +62,24 @@ public class OracleTestUtils {
         }
     }
 
+    public static void ensureJmLeaderServiceExists(
+            HaLeadershipControl leadershipControl, JobID jobId) throws Exception {
+        EmbeddedHaServices control = (EmbeddedHaServices) leadershipControl;
+
+        // Make sure JM leader service has been created, or an NPE might be thrown when we're
+        // triggering JM failover later.
+        control.getJobManagerLeaderElection(jobId).close();
+    }
+
     public static void triggerJobManagerFailover(
             JobID jobId, MiniCluster miniCluster, Runnable afterFailAction) throws Exception {
         final HaLeadershipControl haLeadershipControl = miniCluster.getHaLeadershipControl().get();
+        ensureJmLeaderServiceExists(haLeadershipControl, jobId);
         haLeadershipControl.revokeJobMasterLeadership(jobId).get();
+
         afterFailAction.run();
+
+        ensureJmLeaderServiceExists(haLeadershipControl, jobId);
         haLeadershipControl.grantJobMasterLeadership(jobId).get();
     }
 
@@ -86,7 +100,7 @@ public class OracleTestUtils {
     public static int sinkSize(String sinkName) {
         synchronized (TestValuesTableFactory.class) {
             try {
-                return TestValuesTableFactory.getRawResults(sinkName).size();
+                return TestValuesTableFactory.getRawResultsAsStrings(sinkName).size();
             } catch (IllegalArgumentException e) {
                 // job is not started yet
                 return 0;
@@ -104,7 +118,7 @@ public class OracleTestUtils {
     public static int upsertSinkSize(String sinkName) {
         synchronized (TestValuesTableFactory.class) {
             try {
-                return TestValuesTableFactory.getResults(sinkName).size();
+                return TestValuesTableFactory.getResultsAsStrings(sinkName).size();
             } catch (IllegalArgumentException e) {
                 // job is not started yet
                 return 0;

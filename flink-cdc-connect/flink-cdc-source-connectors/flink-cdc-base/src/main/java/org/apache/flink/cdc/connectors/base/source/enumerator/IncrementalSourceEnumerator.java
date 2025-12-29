@@ -40,6 +40,7 @@ import org.apache.flink.cdc.connectors.base.source.meta.offset.Offset;
 import org.apache.flink.cdc.connectors.base.source.meta.split.FinishedSnapshotSplitInfo;
 import org.apache.flink.cdc.connectors.base.source.meta.split.SourceSplitBase;
 import org.apache.flink.cdc.connectors.base.source.meta.split.StreamSplit;
+import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.FlinkRuntimeException;
 
 import org.apache.flink.shaded.guava31.com.google.common.collect.Lists;
@@ -81,6 +82,7 @@ public class IncrementalSourceEnumerator
     private Boundedness boundedness;
 
     @Nullable protected Integer streamSplitTaskId = null;
+    private boolean isStreamSplitUpdateRequestAlreadySent = false;
 
     public IncrementalSourceEnumerator(
             SplitEnumeratorContext<SourceSplitBase> context,
@@ -125,7 +127,9 @@ public class IncrementalSourceEnumerator
             LOG.info("The enumerator adds add stream split back: {}", streamSplit);
             this.streamSplitTaskId = null;
         }
-        splitAssigner.addSplits(splits);
+        if (!CollectionUtil.isNullOrEmpty(splits)) {
+            splitAssigner.addSplits(splits);
+        }
     }
 
     @Override
@@ -272,10 +276,12 @@ public class IncrementalSourceEnumerator
     }
 
     private void requestStreamSplitUpdateIfNeed() {
-        if (isNewlyAddedAssigningSnapshotFinished(splitAssigner.getAssignerStatus())) {
+        if (!isStreamSplitUpdateRequestAlreadySent
+                && isNewlyAddedAssigningSnapshotFinished(splitAssigner.getAssignerStatus())) {
             // If enumerator knows which reader is assigned stream split, just send to this reader,
             // nor sends to all registered readers.
             if (streamSplitTaskId != null) {
+                isStreamSplitUpdateRequestAlreadySent = true;
                 LOG.info(
                         "The enumerator requests subtask {} to update the stream split after newly added table.",
                         streamSplitTaskId);
@@ -283,6 +289,7 @@ public class IncrementalSourceEnumerator
                         streamSplitTaskId, new StreamSplitUpdateRequestEvent());
             } else {
                 for (int reader : getRegisteredReader()) {
+                    isStreamSplitUpdateRequestAlreadySent = true;
                     LOG.info(
                             "The enumerator requests subtask {} to update the stream split after newly added table.",
                             reader);

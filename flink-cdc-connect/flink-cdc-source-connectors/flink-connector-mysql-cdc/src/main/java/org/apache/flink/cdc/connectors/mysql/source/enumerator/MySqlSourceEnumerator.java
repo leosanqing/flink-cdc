@@ -40,6 +40,7 @@ import org.apache.flink.cdc.connectors.mysql.source.offset.BinlogOffset;
 import org.apache.flink.cdc.connectors.mysql.source.split.FinishedSnapshotSplitInfo;
 import org.apache.flink.cdc.connectors.mysql.source.split.MySqlBinlogSplit;
 import org.apache.flink.cdc.connectors.mysql.source.split.MySqlSplit;
+import org.apache.flink.util.CollectionUtil;
 import org.apache.flink.util.FlinkRuntimeException;
 
 import org.apache.flink.shaded.guava31.com.google.common.collect.Lists;
@@ -80,6 +81,8 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
     private List<List<FinishedSnapshotSplitInfo>> binlogSplitMeta;
 
     @Nullable private Integer binlogSplitTaskId;
+
+    private boolean isBinlogSplitUpdateRequestAlreadySent = false;
 
     public MySqlSourceEnumerator(
             SplitEnumeratorContext<MySqlSplit> context,
@@ -124,7 +127,9 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
             LOG.info("The enumerator adds add binlog split back: {}", binlogSplit);
             this.binlogSplitTaskId = null;
         }
-        splitAssigner.addSplits(splits);
+        if (!CollectionUtil.isNullOrEmpty(splits)) {
+            splitAssigner.addSplits(splits);
+        }
     }
 
     @Override
@@ -273,8 +278,10 @@ public class MySqlSourceEnumerator implements SplitEnumerator<MySqlSplit, Pendin
     }
 
     private void requestBinlogSplitUpdateIfNeed() {
-        if (isNewlyAddedAssigningSnapshotFinished(splitAssigner.getAssignerStatus())) {
+        if (!isBinlogSplitUpdateRequestAlreadySent
+                && isNewlyAddedAssigningSnapshotFinished(splitAssigner.getAssignerStatus())) {
             for (int subtaskId : getRegisteredReader()) {
+                isBinlogSplitUpdateRequestAlreadySent = true;
                 LOG.info(
                         "The enumerator requests subtask {} to update the binlog split after newly added table.",
                         subtaskId);

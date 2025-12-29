@@ -21,9 +21,20 @@ args=("$@")
 # Check if FLINK_HOME is set in command-line arguments by "--flink-home"
 for ((i=0; i < ${#args[@]}; i++)); do
     case "${args[i]}" in
+        --flink-home=*)
+            # Extract the value after "="
+            FLINK_HOME_VALUE="${args[i]#*=}"
+            # Check if the value is not empty
+            if [[ -n "$FLINK_HOME_VALUE" ]]; then
+                FLINK_HOME="$FLINK_HOME_VALUE"
+                echo "[INFO] Set FLINK_HOME to ${FLINK_HOME_VALUE}."
+                break
+            fi
+            ;;
         --flink-home)
             if [[ -n "${args[i+1]}" ]]; then
                 FLINK_HOME="${args[i+1]}"
+                echo "[INFO] Set FLINK_HOME to ${FLINK_HOME}."
                 break
             fi
             ;;
@@ -53,11 +64,11 @@ FLINK_CDC_LOG="$FLINK_CDC_HOME"/log
 # Build Java classpath
 CLASSPATH=""
 # Add Flink libraries to the classpath
-for jar in "$FLINK_HOME"/lib/*.jar; do
+for jar in $(find "$FLINK_HOME"/lib -name "*.jar" -type f); do
   CLASSPATH=$CLASSPATH:$jar
 done
 # Add Flink CDC libraries to classpath
-for jar in "$FLINK_CDC_LIB"/*.jar; do
+for jar in $(find "$FLINK_CDC_LIB" -name "*.jar" -type f); do
   CLASSPATH=$CLASSPATH:$jar
 done
 # Add Hadoop classpath, which is defined in config.sh

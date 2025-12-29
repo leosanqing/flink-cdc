@@ -225,7 +225,7 @@ public class StatementUtils {
     }
 
     public static String quote(String dbOrTableName) {
-        return "`" + dbOrTableName + "`";
+        return "`" + dbOrTableName.replace("`", "``") + "`";
     }
 
     public static String quote(TableId tableId) {
@@ -235,7 +235,6 @@ public class StatementUtils {
     private static PreparedStatement initStatement(JdbcConnection jdbc, String sql, int fetchSize)
             throws SQLException {
         final Connection connection = jdbc.connection();
-        connection.setAutoCommit(false);
         final PreparedStatement statement = connection.prepareStatement(sql);
         statement.setFetchSize(fetchSize);
         return statement;

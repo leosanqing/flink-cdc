@@ -49,6 +49,7 @@ public class MySqlSourceConfigFactory implements Serializable {
     private ServerIdRange serverIdRange;
     private List<String> databaseList;
     private List<String> tableList;
+    private String excludeTableList;
     private String serverTimeZone = ZoneId.systemDefault().getId();
     private StartupOptions startupOptions = StartupOptions.initial();
     private int splitSize = MySqlSourceOptions.SCAN_INCREMENTAL_SNAPSHOT_CHUNK_SIZE.defaultValue();
@@ -62,6 +63,7 @@ public class MySqlSourceConfigFactory implements Serializable {
     private double distributionFactorLower =
             MySqlSourceOptions.CHUNK_KEY_EVEN_DISTRIBUTION_FACTOR_LOWER_BOUND.defaultValue();
     private boolean includeSchemaChanges = false;
+    private boolean includeHeartbeatEvents = false;
     private boolean scanNewlyAddedTableEnabled = false;
     private boolean closeIdleReaders = false;
     private Properties jdbcProperties;
@@ -69,6 +71,10 @@ public class MySqlSourceConfigFactory implements Serializable {
     private Properties dbzProperties;
     private Map<ObjectPath, String> chunkKeyColumns = new HashMap<>();
     private boolean skipSnapshotBackfill = false;
+    private boolean parseOnLineSchemaChanges = false;
+    private boolean treatTinyInt1AsBoolean = true;
+    private boolean useLegacyJsonFormat = true;
+    private boolean assignUnboundedChunkFirst = false;
 
     public MySqlSourceConfigFactory hostname(String hostname) {
         this.hostname = hostname;
@@ -99,6 +105,11 @@ public class MySqlSourceConfigFactory implements Serializable {
      */
     public MySqlSourceConfigFactory tableList(String... tableList) {
         this.tableList = Arrays.asList(tableList);
+        return this;
+    }
+
+    public MySqlSourceConfigFactory excludeTableList(String tableInclusions) {
+        this.excludeTableList = tableInclusions;
         return this;
     }
 
@@ -225,6 +236,12 @@ public class MySqlSourceConfigFactory implements Serializable {
         return this;
     }
 
+    /** Whether the {@link MySqlSource} should output the heartbeat events or not. */
+    public MySqlSourceConfigFactory includeHeartbeatEvents(boolean includeHeartbeatEvents) {
+        this.includeHeartbeatEvents = includeHeartbeatEvents;
+        return this;
+    }
+
     /** Whether the {@link MySqlSource} should scan the newly added tables or not. */
     public MySqlSourceConfigFactory scanNewlyAddedTableEnabled(boolean scanNewlyAddedTableEnabled) {
         this.scanNewlyAddedTableEnabled = scanNewlyAddedTableEnabled;
@@ -271,6 +288,15 @@ public class MySqlSourceConfigFactory implements Serializable {
     }
 
     /**
+     * Whether to use legacy json format. The default value is true, which means there is no
+     * whitespace before value and after comma in json format.
+     */
+    public MySqlSourceConfigFactory useLegacyJsonFormat(boolean useLegacyJsonFormat) {
+        this.useLegacyJsonFormat = useLegacyJsonFormat;
+        return this;
+    }
+
+    /**
      * Whether to close idle readers at the end of the snapshot phase. This feature depends on
      * FLIP-147: Support Checkpoints After Tasks Finished. The flink version is required to be
      * greater than or equal to 1.14, and the configuration <code>
@@ -282,6 +308,26 @@ public class MySqlSourceConfigFactory implements Serializable {
      */
     public MySqlSourceConfigFactory closeIdleReaders(boolean closeIdleReaders) {
         this.closeIdleReaders = closeIdleReaders;
+        return this;
+    }
+
+    /** Whether to parse gh-ost/pt-osc utility generated schema change events. Defaults to false. */
+    public MySqlSourceConfigFactory parseOnLineSchemaChanges(boolean parseOnLineSchemaChanges) {
+        this.parseOnLineSchemaChanges = parseOnLineSchemaChanges;
+        return this;
+    }
+
+    public MySqlSourceConfigFactory treatTinyInt1AsBoolean(boolean treatTinyInt1AsBoolean) {
+        this.treatTinyInt1AsBoolean = treatTinyInt1AsBoolean;
+        return this;
+    }
+
+    /**
+     * Whether to assign the unbounded chunks first during snapshot reading phase. Defaults to
+     * false.
+     */
+    public MySqlSourceConfigFactory assignUnboundedChunkFirst(boolean assignUnboundedChunkFirst) {
+        this.assignUnboundedChunkFirst = assignUnboundedChunkFirst;
         return this;
     }
 
@@ -360,6 +406,7 @@ public class MySqlSourceConfigFactory implements Serializable {
                 password,
                 databaseList,
                 tableList,
+                excludeTableList,
                 serverIdRange,
                 startupOptions,
                 splitSize,
@@ -372,11 +419,16 @@ public class MySqlSourceConfigFactory implements Serializable {
                 distributionFactorUpper,
                 distributionFactorLower,
                 includeSchemaChanges,
+                includeHeartbeatEvents,
                 scanNewlyAddedTableEnabled,
                 closeIdleReaders,
                 props,
                 jdbcProperties,
                 chunkKeyColumns,
-                skipSnapshotBackfill);
+                skipSnapshotBackfill,
+                parseOnLineSchemaChanges,
+                treatTinyInt1AsBoolean,
+                useLegacyJsonFormat,
+                assignUnboundedChunkFirst);
     }
 }

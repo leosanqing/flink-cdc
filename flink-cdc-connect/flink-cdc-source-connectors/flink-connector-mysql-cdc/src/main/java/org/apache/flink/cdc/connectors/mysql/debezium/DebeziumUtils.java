@@ -193,14 +193,16 @@ public class DebeziumUtils {
 
         final List<TableId> capturedTableIds;
         try {
-            capturedTableIds = TableDiscoveryUtils.listTables(jdbc, sourceConfig.getTableFilters());
+            capturedTableIds =
+                    TableDiscoveryUtils.listTables(
+                            jdbc, sourceConfig.getDatabaseFilter(), sourceConfig.getTableFilter());
         } catch (SQLException e) {
             throw new FlinkRuntimeException("Failed to discover captured tables", e);
         }
         if (capturedTableIds.isEmpty()) {
             throw new IllegalArgumentException(
                     String.format(
-                            "Can't find any matched tables, please check your configured database-name: %s and table-name: %s",
+                            "No matched tables found. Please verify:\n1) The configured database(s) [%s] and table(s) [%s] exist;\n2) The MySQL user has sufficient permissions to access them.",
                             sourceConfig.getDatabaseList(), sourceConfig.getTableList()));
         }
         return capturedTableIds;

@@ -22,6 +22,7 @@ import org.apache.flink.cdc.connectors.base.dialect.JdbcDataSourceDialect;
 import org.apache.flink.cdc.connectors.base.relational.connection.JdbcConnectionFactory;
 import org.apache.flink.cdc.connectors.base.relational.connection.JdbcConnectionPoolFactory;
 import org.apache.flink.cdc.connectors.base.source.assigner.splitter.ChunkSplitter;
+import org.apache.flink.cdc.connectors.base.source.assigner.state.ChunkSplitterState;
 import org.apache.flink.cdc.connectors.base.source.meta.offset.Offset;
 import org.apache.flink.cdc.connectors.base.source.meta.split.SourceSplitBase;
 import org.apache.flink.cdc.connectors.base.source.reader.external.FetchTask;
@@ -40,6 +41,7 @@ import io.debezium.connector.postgresql.PostgresSchema;
 import io.debezium.connector.postgresql.PostgresTaskContext;
 import io.debezium.connector.postgresql.PostgresTopicSelector;
 import io.debezium.connector.postgresql.connection.PostgresConnection;
+import io.debezium.connector.postgresql.connection.PostgresConnectionUtils;
 import io.debezium.connector.postgresql.connection.PostgresReplicationConnection;
 import io.debezium.jdbc.JdbcConnection;
 import io.debezium.relational.TableId;
@@ -50,7 +52,6 @@ import io.debezium.schema.TopicSelector;
 import javax.annotation.Nullable;
 
 import java.sql.SQLException;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -140,6 +141,17 @@ public class PostgresDialect implements JdbcDataSourceDialect {
         }
     }
 
+    public Offset displayCommittedOffset(JdbcSourceConfig sourceConfig) {
+
+        try (JdbcConnection jdbc = openJdbcConnection(sourceConfig)) {
+            return PostgresConnectionUtils.committedOffset(
+                    (PostgresConnection) jdbc, getSlotName(), getPluginName());
+
+        } catch (SQLException e) {
+            throw new FlinkRuntimeException(e);
+        }
+    }
+
     @Override
     public boolean isDataCollectionIdCaseSensitive(JdbcSourceConfig sourceConfig) {
         // from Postgres docs:
@@ -151,15 +163,27 @@ public class PostgresDialect implements JdbcDataSourceDialect {
 
     @Override
     public ChunkSplitter createChunkSplitter(JdbcSourceConfig sourceConfig) {
-        return new PostgresChunkSplitter(sourceConfig, this);
+        return new PostgresChunkSplitter(
+                sourceConfig, this, ChunkSplitterState.NO_SPLITTING_TABLE_STATE);
+    }
+
+    @Override
+    public ChunkSplitter createChunkSplitter(
+            JdbcSourceConfig sourceConfig, ChunkSplitterState chunkSplitterState) {
+        return new PostgresChunkSplitter(sourceConfig, this, chunkSplitterState);
     }
 
     @Override
     public List<TableId> discoverDataCollections(JdbcSourceConfig sourceConfig) {
         try (JdbcConnection jdbc = openJdbcConnection(sourceConfig)) {
+            boolean includePartitionedTables =
+                    ((PostgresSourceConfig) sourceConfig).includePartitionedTables();
             return TableDiscoveryUtils.listTables(
                     // there is always a single database provided
-                    sourceConfig.getDatabaseList().get(0), jdbc, sourceConfig.getTableFilters());
+                    sourceConfig.getDatabaseList().get(0),
+                    jdbc,
+                    sourceConfig.getTableFilters(),
+                    includePartitionedTables);
         } catch (SQLException e) {
             throw new FlinkRuntimeException("Error to discover tables: " + e.getMessage(), e);
         }
@@ -171,11 +195,7 @@ public class PostgresDialect implements JdbcDataSourceDialect {
 
         try (JdbcConnection jdbc = openJdbcConnection(sourceConfig)) {
             // fetch table schemas
-            Map<TableId, TableChange> tableSchemas = new HashMap<>();
-            for (TableId tableId : capturedTableIds) {
-                TableChange tableSchema = queryTableSchema(jdbc, tableId);
-                tableSchemas.put(tableId, tableSchema);
-            }
+            Map<TableId, TableChange> tableSchemas = queryTableSchema(jdbc, capturedTableIds);
             return tableSchemas;
         } catch (Exception e) {
             throw new FlinkRuntimeException(
@@ -194,6 +214,14 @@ public class PostgresDialect implements JdbcDataSourceDialect {
             schema = new CustomPostgresSchema((PostgresConnection) jdbc, sourceConfig);
         }
         return schema.getTableSchema(tableId);
+    }
+
+    private Map<TableId, TableChange> queryTableSchema(
+            JdbcConnection jdbc, List<TableId> tableIds) {
+        if (schema == null) {
+            schema = new CustomPostgresSchema((PostgresConnection) jdbc, sourceConfig);
+        }
+        return schema.getTableSchema(tableIds);
     }
 
     @Override
@@ -233,5 +261,13 @@ public class PostgresDialect implements JdbcDataSourceDialect {
 
     public String getPluginName() {
         return sourceConfig.getDbzProperties().getProperty(PLUGIN_NAME.name());
+    }
+
+    public boolean removeSlot(String slotName) {
+        try (PostgresConnection jdbc = (PostgresConnection) openJdbcConnection(sourceConfig)) {
+            return jdbc.dropReplicationSlot(slotName);
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

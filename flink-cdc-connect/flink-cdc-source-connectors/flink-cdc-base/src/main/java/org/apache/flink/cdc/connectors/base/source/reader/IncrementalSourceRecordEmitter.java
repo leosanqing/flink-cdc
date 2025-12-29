@@ -21,6 +21,7 @@ import org.apache.flink.api.connector.source.SourceOutput;
 import org.apache.flink.cdc.connectors.base.source.meta.offset.Offset;
 import org.apache.flink.cdc.connectors.base.source.meta.offset.OffsetFactory;
 import org.apache.flink.cdc.connectors.base.source.meta.split.SourceRecords;
+import org.apache.flink.cdc.connectors.base.source.meta.split.SourceSplitBase;
 import org.apache.flink.cdc.connectors.base.source.meta.split.SourceSplitState;
 import org.apache.flink.cdc.connectors.base.source.metrics.SourceReaderMetrics;
 import org.apache.flink.cdc.debezium.DebeziumDeserializationSchema;
@@ -152,10 +153,25 @@ public class IncrementalSourceRecordEmitter<T>
     }
 
     protected void emitElement(SourceRecord element, SourceOutput<T> output) throws Exception {
+        sourceReaderMetrics.markRecord();
+        sourceReaderMetrics.updateRecordCounters(element);
+
         outputCollector.output = output;
         outputCollector.currentMessageTimestamp = getMessageTimestamp(element);
         debeziumDeserializationSchema.deserialize(element, outputCollector);
     }
+
+    /**
+     * Apply the split to the record emitter.
+     *
+     * <p>This method is called when a new split is assigned to the record emitter. It allows the
+     * record emitter to perform any necessary initialization or setup based on the characteristics
+     * of the assigned split. In this implementation, we may need to handle split-specific
+     * configurations or state initialization.
+     *
+     * @param split the split to apply
+     */
+    public void applySplit(SourceSplitBase split) {}
 
     protected void reportMetrics(SourceRecord element) {
         Long messageTimestamp = getMessageTimestamp(element);
@@ -169,9 +185,10 @@ public class IncrementalSourceRecordEmitter<T>
         }
     }
 
-    private static class OutputCollector<T> implements Collector<T> {
-        private SourceOutput<T> output;
-        private Long currentMessageTimestamp;
+    /** An adapter between {@link SourceOutput} and {@link Collector}. */
+    protected static class OutputCollector<T> implements Collector<T> {
+        public SourceOutput<T> output;
+        public Long currentMessageTimestamp;
 
         @Override
         public void collect(T record) {

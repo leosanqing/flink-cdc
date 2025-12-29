@@ -41,6 +41,8 @@ public class ValuesDataSourceOptions {
                                                     text(
                                                             "SINGLE_SPLIT_SINGLE_TABLE: Default and predetermined case. Creating schema changes of single table and put them into one split."),
                                                     text(
+                                                            "SINGLE_SPLIT_SINGLE_TABLE_WITH_DEFAULT_VALUE: A predetermined case. Creating schema changes of single table (some columns have default value) and put them into one split."),
+                                                    text(
                                                             "SINGLE_SPLIT_MULTI_TABLES: A predetermined case. Creating schema changes of multiple tables and put them into one split."),
                                                     text(
                                                             "MULTI_SPLITS_SINGLE_TABLE: A predetermined case. Creating schema changes of single table and put them into multiple splits."),
@@ -54,4 +56,10 @@ public class ValuesDataSourceOptions {
                     .defaultValue(Integer.MAX_VALUE)
                     .withDescription(
                             "Specific index of test events to fail, set a Integer.MAX_VALUE value by default to avoid failure.");
+
+    public static final ConfigOption<Boolean> BATCH_MODE_ENABLED =
+            ConfigOptions.key("batch-mode.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Provide bounded data in batch mode.");
 }

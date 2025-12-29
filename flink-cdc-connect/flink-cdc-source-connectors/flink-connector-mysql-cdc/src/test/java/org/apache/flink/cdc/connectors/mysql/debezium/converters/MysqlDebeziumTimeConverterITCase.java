@@ -39,12 +39,10 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMap
 
 import io.debezium.connector.mysql.converters.MysqlDebeziumTimeConverter;
 import io.debezium.data.Envelope;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-import org.junit.rules.Timeout;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
@@ -64,16 +62,17 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Properties;
-import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import static java.lang.String.format;
 import static org.apache.flink.cdc.connectors.mysql.source.MySqlSourceTestBase.assertEqualsInAnyOrder;
 
 /** Test for {@link MysqlDebeziumTimeConverter}. */
-public class MysqlDebeziumTimeConverterITCase {
+@Timeout(value = 300, unit = TimeUnit.SECONDS)
+class MysqlDebeziumTimeConverterITCase {
 
-    private static TemporaryFolder tempFolder;
+    private Path tempFolder;
     private static File resourceFolder;
 
     private final StreamExecutionEnvironment env =
@@ -82,9 +81,7 @@ public class MysqlDebeziumTimeConverterITCase {
     private static final Logger LOG =
             LoggerFactory.getLogger(MysqlDebeziumTimeConverterITCase.class);
 
-    @Rule public final Timeout timeoutPerTest = Timeout.seconds(300);
-
-    @Before
+    @BeforeEach
     public void setup() throws Exception {
         resourceFolder =
                 Paths.get(
@@ -94,33 +91,32 @@ public class MysqlDebeziumTimeConverterITCase {
                                                         .getResource("."))
                                         .toURI())
                         .toFile();
-        tempFolder = new TemporaryFolder(resourceFolder);
-        tempFolder.create();
+        tempFolder = Files.createTempDirectory(resourceFolder.toPath(), "mysql-config");
         env.setParallelism(1);
     }
 
     @Test
-    public void testReadDateConvertDataStreamInJvmTime() throws Exception {
+    void testReadDateConvertDataStreamInJvmTime() throws Exception {
         testReadDateConvertDataStreamSource(ZoneId.systemDefault().toString());
     }
 
     @Test
-    public void testReadDateConvertDataStreamInAsia() throws Exception {
+    void testReadDateConvertDataStreamInAsia() throws Exception {
         testReadDateConvertDataStreamSource("Asia/Shanghai");
     }
 
     @Test
-    public void testReadDateConvertDataStreamInBerlin() throws Exception {
+    void testReadDateConvertDataStreamInBerlin() throws Exception {
         testReadDateConvertDataStreamSource("Europe/Berlin");
     }
 
     @Test
-    public void testReadDateConvertSQLSourceInAsia() throws Exception {
+    void testReadDateConvertSQLSourceInAsia() throws Exception {
         testTemporalTypesWithMySqlServerTimezone("Asia/Shanghai");
     }
 
     @Test
-    public void testReadDateConvertSQLSourceInBerlin() throws Exception {
+    void testReadDateConvertSQLSourceInBerlin() throws Exception {
         testTemporalTypesWithMySqlServerTimezone("Europe/Berlin");
     }
 
@@ -154,12 +150,13 @@ public class MysqlDebeziumTimeConverterITCase {
 
     private void validTimestampValue(List<String> result) throws JsonProcessingException {
         ObjectMapper mapper = new ObjectMapper();
-        String[] timestampValues = new String[] {"14:23:00", "00:00:00", "00:00:00"};
+        String[] timestampValues = new String[] {"14:23:00", "00:00:00", "00:00:00", "15:04:00"};
         for (String after : result) {
             JsonNode jsonNode = mapper.readTree(after);
-            Assert.assertEquals(
-                    timestampValues[jsonNode.get(Envelope.FieldName.AFTER).get("id").asInt() - 1],
-                    jsonNode.get("after").get("test_timestamp").asText());
+            Assertions.assertThat(jsonNode.get("after").get("test_timestamp").asText())
+                    .isEqualTo(
+                            timestampValues[
+                                    jsonNode.get(Envelope.FieldName.AFTER).get("id").asInt() - 1]);
         }
     }
 
@@ -232,7 +229,8 @@ public class MysqlDebeziumTimeConverterITCase {
                 new String[] {
                     "+I[1, 14:23:00, 2023-04-01 14:24:00, 2023-04-01, 14:25:00]",
                     "+I[3, 00:00:00, null, null, 00:01:20]",
-                    "+I[2, 00:00:00, null, null, 00:00:00]"
+                    "+I[2, 00:00:00, null, null, 00:00:00]",
+                    "+I[4, 15:04:00, null, null, 00:01:10]"
                 };
 
         List<String> expectedSnapshotData = new ArrayList<>(Arrays.asList(snapshotForSingleTable));
@@ -275,15 +273,28 @@ public class MysqlDebeziumTimeConverterITCase {
     }
 
     private String buildMySqlConfigWithTimezone(String timezone) {
+        // JVM timezone is in "GMT+XX:XX" or "GMT-XX:XX" format
+        // while MySQL configuration file requires "+XX:XX" or "-XX:XX"
+        if (timezone.startsWith("GMT")) {
+            timezone = timezone.substring(3);
+        }
+
+        // But if we run JVM with -Duser.timezone=GMT+0:00, the timezone String will be set to "GMT"
+        // (without redundant offset part). We can't pass an empty string to MySQL, or it will
+        // panic.
+        if (timezone.isEmpty()) {
+            timezone = "UTC";
+        }
+
         try {
-            File folder = tempFolder.newFolder(String.valueOf(UUID.randomUUID()));
-            Path cnf = Files.createFile(Paths.get(folder.getPath(), "my.cnf"));
+            Path cnf = Files.createFile(Paths.get(tempFolder.toString(), "my.cnf"));
             String mysqldConf =
                     "[mysqld]\n"
                             + "binlog_format = row\n"
                             + "log_bin = mysql-bin\n"
                             + "server-id = 223344\n"
-                            + "binlog_row_image = FULL\n";
+                            + "binlog_row_image = FULL\n"
+                            + "sql_mode = ALLOW_INVALID_DATES,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION\n";
             String timezoneConf = "default-time_zone = '" + timezone + "'\n";
             Files.write(
                     cnf,

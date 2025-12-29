@@ -20,15 +20,17 @@ package org.apache.flink.cdc.runtime.operators.transform;
 import org.apache.flink.cdc.common.types.DataType;
 import org.apache.flink.cdc.common.types.DataTypes;
 import org.apache.flink.cdc.common.udf.UserDefinedFunction;
+import org.apache.flink.cdc.runtime.model.OpenAIEmbeddingModel;
 import org.apache.flink.table.functions.ScalarFunction;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** Testcases for {@link UserDefinedFunctionDescriptor}. */
-public class UserDefinedFunctionDescriptorTest {
+class UserDefinedFunctionDescriptorTest {
 
     /** This is a plain Flink CDC UDF. */
     public static class CdcUdf implements UserDefinedFunction {}
@@ -48,7 +50,7 @@ public class UserDefinedFunctionDescriptorTest {
     public static class NotUDF {}
 
     @Test
-    void testUserDefinedFunctionDescriptor() {
+    void testUserDefinedFunctionDescriptor() throws JsonProcessingException {
 
         assertThat(new UserDefinedFunctionDescriptor("cdc_udf", CdcUdf.class.getName()))
                 .extracting("name", "className", "classpath", "returnTypeHint", "isCdcPipelineUdf")
@@ -93,5 +95,14 @@ public class UserDefinedFunctionDescriptorTest {
                                         "not_even_exist", "not.a.valid.class.path"))
                 .isExactlyInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Failed to instantiate UDF not_even_exist@not.a.valid.class.path");
+        String name = "GET_EMBEDDING";
+        assertThat(new UserDefinedFunctionDescriptor(name, OpenAIEmbeddingModel.class.getName()))
+                .extracting("name", "className", "classpath", "returnTypeHint", "isCdcPipelineUdf")
+                .containsExactly(
+                        "GET_EMBEDDING",
+                        "OpenAIEmbeddingModel",
+                        "org.apache.flink.cdc.runtime.model.OpenAIEmbeddingModel",
+                        DataTypes.ARRAY(DataTypes.FLOAT()),
+                        true);
     }
 }

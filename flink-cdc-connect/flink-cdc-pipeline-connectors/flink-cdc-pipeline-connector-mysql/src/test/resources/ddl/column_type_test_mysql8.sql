@@ -72,6 +72,9 @@ CREATE TABLE common_types
     multiline_c          MULTILINESTRING,
     multipolygon_c       MULTIPOLYGON,
     geometrycollection_c GEOMETRYCOLLECTION,
+    long_c               LONG,
+    long_varchar_c       LONG VARCHAR,
+    varchar_len0_c        VARCHAR(0),
     PRIMARY KEY (id)
 ) DEFAULT CHARSET=utf8;
 
@@ -94,7 +97,9 @@ VALUES (DEFAULT, 127, 255, 255, 32767, 65535, 65535, 8388607, 16777215, 16777215
         ST_GeomFromText('MULTIPOINT((1 1),(2 2))'),
         ST_GeomFromText('MultiLineString((1 1,2 2,3 3),(4 4,5 5))'),
         ST_GeomFromText('MULTIPOLYGON(((0 0, 10 0, 10 10, 0 10, 0 0)), ((5 5, 7 5, 7 7, 5 7, 5 5)))'),
-        ST_GeomFromText('GEOMETRYCOLLECTION(POINT(10 10), POINT(30 30), LINESTRING(15 15, 20 20))'));
+        ST_GeomFromText('GEOMETRYCOLLECTION(POINT(10 10), POINT(30 30), LINESTRING(15 15, 20 20))'),
+        'long','long varchar',
+        '');
 
 CREATE TABLE time_types
 (
@@ -141,9 +146,21 @@ CREATE TABLE precision_types
     datetime_c           DATETIME(0),
     datetime3_c          DATETIME(3),
     datetime6_c          DATETIME(6),
-    timestamp_c          TIMESTAMP(0),
-    timestamp3_c         TIMESTAMP(3),
-    timestamp6_c         TIMESTAMP(6),
+    timestamp_c          TIMESTAMP(0) NULL,
+    timestamp3_c         TIMESTAMP(3) NULL,
+    timestamp6_c         TIMESTAMP(6) NULL,
+    float_c0             FLOAT(6, 0),
+    float_c1             FLOAT(20, 3),
+    float_c2             FLOAT(24, 12),
+    real_c0              REAL(6, 0),
+    real_c1              REAL(20, 3),
+    real_c2              REAL(24, 12),
+    double_c0            DOUBLE(6, 0),
+    double_c1            DOUBLE(20, 3),
+    double_c2            DOUBLE(24, 12),
+    double_precision_c0  DOUBLE PRECISION(6, 0),
+    double_precision_c1  DOUBLE PRECISION(20, 3),
+    double_precision_c2  DOUBLE PRECISION(24, 12),
     PRIMARY KEY (id)
 ) DEFAULT CHARSET=utf8;
 
@@ -160,4 +177,34 @@ VALUES (DEFAULT,
         '2020-07-17 18:00:22',
         '2020-07-17 18:00',
         '2020-07-17 18:00:22',
-        '2020-07-17 18:00:22');
+        '2020-07-17 18:00:22',
+        2,
+        3,
+        5,
+        7,
+        11,
+        13,
+        17,
+        19,
+        23,
+        29,
+        31,
+        37);
+
+CREATE TABLE json_types
+(
+    id                   SERIAL,
+    json_c0               JSON,
+    json_c1               JSON,
+    json_c2               JSON,
+    int_c  INTEGER,
+    PRIMARY KEY (id)
+) DEFAULT CHARSET=utf8;
+
+INSERT INTO json_types
+VALUES (DEFAULT,
+        '{"key1":"value1"}',
+        '{"key1":"value1","key2":"value2"}',
+        '[{"key1":"value1","key2":{"key2_1":"value2_1","key2_2":"value2_2"},"key3":["value3"],"key4":["value4_1","value4_2"]},{"key5":"value5"}]',
+        1
+        );

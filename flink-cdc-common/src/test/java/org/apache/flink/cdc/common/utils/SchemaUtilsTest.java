@@ -37,10 +37,10 @@ import java.util.List;
 import java.util.Map;
 
 /** A test for the {@link org.apache.flink.cdc.common.utils.SchemaUtils}. */
-public class SchemaUtilsTest {
+class SchemaUtilsTest {
 
     @Test
-    public void testApplyColumnSchemaChangeEvent() {
+    void testApplyColumnSchemaChangeEvent() {
         TableId tableId = TableId.parse("default.default.table1");
         Schema schema =
                 Schema.newBuilder()
@@ -165,7 +165,7 @@ public class SchemaUtilsTest {
     }
 
     @Test
-    public void testGetNumericPrecision() {
+    void testGetNumericPrecision() {
         Assertions.assertThat(SchemaUtils.getNumericPrecision(DataTypes.TINYINT())).isEqualTo(3);
         Assertions.assertThat(SchemaUtils.getNumericPrecision(DataTypes.SMALLINT())).isEqualTo(5);
         Assertions.assertThat(SchemaUtils.getNumericPrecision(DataTypes.INT())).isEqualTo(10);
@@ -180,7 +180,7 @@ public class SchemaUtilsTest {
     }
 
     @Test
-    public void testInferWiderType() {
+    void testInferWiderType() {
         Assertions.assertThat(
                         SchemaUtils.inferWiderType(DataTypes.BINARY(17), DataTypes.BINARY(17)))
                 .isEqualTo(DataTypes.BINARY(17));
@@ -273,6 +273,23 @@ public class SchemaUtilsTest {
                                 DataTypes.DECIMAL(5, 4), DataTypes.DECIMAL(10, 2)))
                 .isEqualTo(DataTypes.DECIMAL(12, 4));
 
+        // Test overflow decimal conversions
+        Assertions.assertThatThrownBy(
+                        () ->
+                                SchemaUtils.inferWiderType(
+                                        DataTypes.DECIMAL(5, 5), DataTypes.DECIMAL(38, 0)))
+                .isExactlyInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "Failed to merge DECIMAL(5, 5) NOT NULL and DECIMAL(38, 0) NOT NULL type into DECIMAL. 43 precision digits required, 38 available");
+
+        Assertions.assertThatThrownBy(
+                        () ->
+                                SchemaUtils.inferWiderType(
+                                        DataTypes.DECIMAL(38, 0), DataTypes.DECIMAL(5, 5)))
+                .isExactlyInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "Failed to merge DECIMAL(38, 0) NOT NULL and DECIMAL(5, 5) NOT NULL type into DECIMAL. 43 precision digits required, 38 available");
+
         // Test merging with nullability
         Assertions.assertThat(
                         SchemaUtils.inferWiderType(
@@ -291,6 +308,35 @@ public class SchemaUtilsTest {
                                 DataTypes.INT().nullable(), DataTypes.INT().nullable()))
                 .isEqualTo(DataTypes.INT().nullable());
 
+        // Test merging temporal types
+        Assertions.assertThat(
+                        SchemaUtils.inferWiderType(DataTypes.TIMESTAMP(9), DataTypes.TIMESTAMP(6)))
+                .isEqualTo(DataTypes.TIMESTAMP(9));
+
+        Assertions.assertThat(
+                        SchemaUtils.inferWiderType(
+                                DataTypes.TIMESTAMP_TZ(3), DataTypes.TIMESTAMP_TZ(7)))
+                .isEqualTo(DataTypes.TIMESTAMP_TZ(7));
+
+        Assertions.assertThat(
+                        SchemaUtils.inferWiderType(
+                                DataTypes.TIMESTAMP_LTZ(2), DataTypes.TIMESTAMP_LTZ(1)))
+                .isEqualTo(DataTypes.TIMESTAMP_LTZ(2));
+
+        Assertions.assertThat(
+                        SchemaUtils.inferWiderType(
+                                DataTypes.TIMESTAMP_LTZ(), DataTypes.TIMESTAMP()))
+                .isEqualTo(DataTypes.TIMESTAMP(9));
+
+        Assertions.assertThat(
+                        SchemaUtils.inferWiderType(DataTypes.TIMESTAMP_TZ(), DataTypes.TIMESTAMP()))
+                .isEqualTo(DataTypes.TIMESTAMP(9));
+
+        Assertions.assertThat(
+                        SchemaUtils.inferWiderType(
+                                DataTypes.TIMESTAMP_LTZ(), DataTypes.TIMESTAMP_TZ()))
+                .isEqualTo(DataTypes.TIMESTAMP(9));
+
         // incompatible type merges test
         Assertions.assertThatThrownBy(
                         () -> SchemaUtils.inferWiderType(DataTypes.INT(), DataTypes.DOUBLE()))
@@ -307,7 +353,7 @@ public class SchemaUtilsTest {
     }
 
     @Test
-    public void testInferWiderColumn() {
+    void testInferWiderColumn() {
         // Test normal merges
         Assertions.assertThat(
                         SchemaUtils.inferWiderColumn(
@@ -339,7 +385,7 @@ public class SchemaUtilsTest {
     }
 
     @Test
-    public void testInferWiderSchema() {
+    void testInferWiderSchema() {
         // Test normal merges
         Assertions.assertThat(
                         SchemaUtils.inferWiderSchema(
