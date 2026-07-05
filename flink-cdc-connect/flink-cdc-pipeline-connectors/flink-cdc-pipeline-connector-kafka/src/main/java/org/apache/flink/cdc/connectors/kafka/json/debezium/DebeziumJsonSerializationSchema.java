@@ -25,7 +25,10 @@ import org.apache.flink.cdc.common.event.SchemaChangeEvent;
 import org.apache.flink.cdc.common.event.TableId;
 import org.apache.flink.cdc.common.schema.Column;
 import org.apache.flink.cdc.common.schema.Schema;
+import org.apache.flink.cdc.common.types.ArrayType;
+import org.apache.flink.cdc.common.types.DataField;
 import org.apache.flink.cdc.common.types.DecimalType;
+import org.apache.flink.cdc.common.types.MapType;
 import org.apache.flink.cdc.common.types.TimestampType;
 import org.apache.flink.cdc.common.types.utils.DataTypeUtils;
 import org.apache.flink.cdc.common.utils.SchemaUtils;
@@ -50,7 +53,11 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.json.JsonConverter;
 import org.apache.kafka.connect.storage.ConverterConfig;
 import org.apache.kafka.connect.storage.ConverterType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.List;
@@ -76,6 +83,9 @@ import static org.apache.flink.table.types.utils.TypeConversions.fromLogicalToDa
  */
 public class DebeziumJsonSerializationSchema implements SerializationSchema<Event> {
     private static final long serialVersionUID = 1L;
+
+    private static final Logger LOG =
+            LoggerFactory.getLogger(DebeziumJsonSerializationSchema.class);
 
     private static final StringData OP_INSERT = StringData.fromString("c"); // insert
     private static final StringData OP_DELETE = StringData.fromString("d"); // delete
@@ -249,6 +259,76 @@ public class DebeziumJsonSerializationSchema implements SerializationSchema<Even
 
     private static SchemaBuilder convertCDCDataTypeToDebeziumDataType(Column column) {
         org.apache.flink.cdc.common.types.DataType columnType = column.getType();
+        SchemaBuilder field = convertCDCDataTypeToDebeziumDataType(columnType);
+
+        if (columnType.isNullable()) {
+            field.optional();
+        } else {
+            field.required();
+        }
+        if (column.getDefaultValueExpression() != null) {
+            Object convertedDefault =
+                    convertDefaultValue(column.getDefaultValueExpression(), columnType);
+            if (convertedDefault != null) {
+                field.defaultValue(convertedDefault);
+            }
+        }
+        if (column.getComment() != null) {
+            field.doc(column.getComment());
+        }
+        return field;
+    }
+
+    /**
+     * Convert a default value expression string to the Java object matching the Debezium schema
+     * type.
+     */
+    private static Object convertDefaultValue(
+            String defaultValueExpression, org.apache.flink.cdc.common.types.DataType columnType) {
+        try {
+            switch (columnType.getTypeRoot()) {
+                case BOOLEAN:
+                    return Boolean.parseBoolean(defaultValueExpression);
+                case TINYINT:
+                case SMALLINT:
+                    return Short.parseShort(defaultValueExpression);
+                case INTEGER:
+                case DATE:
+                    return Integer.parseInt(defaultValueExpression);
+                case BIGINT:
+                case TIME_WITHOUT_TIME_ZONE:
+                case TIMESTAMP_WITHOUT_TIME_ZONE:
+                case TIMESTAMP_WITH_TIME_ZONE:
+                    return Long.parseLong(defaultValueExpression);
+                case FLOAT:
+                    return Float.parseFloat(defaultValueExpression);
+                case DOUBLE:
+                    return Double.parseDouble(defaultValueExpression);
+                case DECIMAL:
+                    DecimalType decimalType = (DecimalType) columnType;
+                    return new BigDecimal(defaultValueExpression)
+                            .setScale(decimalType.getScale(), RoundingMode.HALF_UP);
+                case BINARY:
+                case VARBINARY:
+                    return defaultValueExpression.getBytes();
+                case CHAR:
+                case VARCHAR:
+                case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
+                default:
+                    return defaultValueExpression;
+            }
+        } catch (NumberFormatException e) {
+            LOG.warn(
+                    "Failed to convert default value '{}' for type {}, skipping default value.",
+                    defaultValueExpression,
+                    columnType.getTypeRoot(),
+                    e);
+            return null;
+        }
+    }
+
+    private static SchemaBuilder convertCDCDataTypeToDebeziumDataType(
+            org.apache.flink.cdc.common.types.DataType columnType) {
         final SchemaBuilder field;
         switch (columnType.getTypeRoot()) {
             case TINYINT:
@@ -310,23 +390,37 @@ public class DebeziumJsonSerializationSchema implements SerializationSchema<Even
                                                         .orElse(0)))
                                 .version(1);
                 break;
+            case ARRAY:
+                ArrayType arrayType = (ArrayType) columnType;
+                org.apache.kafka.connect.data.Schema elementSchema =
+                        convertCDCDataTypeToDebeziumDataType(arrayType.getElementType()).build();
+                field = SchemaBuilder.array(elementSchema);
+                break;
+            case MAP:
+                MapType mapType = (MapType) columnType;
+                org.apache.kafka.connect.data.Schema keySchema =
+                        convertCDCDataTypeToDebeziumDataType(mapType.getKeyType()).build();
+                org.apache.kafka.connect.data.Schema valueSchema =
+                        convertCDCDataTypeToDebeziumDataType(mapType.getValueType()).build();
+                field = SchemaBuilder.map(keySchema, valueSchema);
+                break;
+            case ROW:
+                org.apache.flink.cdc.common.types.RowType rowType =
+                        (org.apache.flink.cdc.common.types.RowType) columnType;
+                SchemaBuilder structBuilder = SchemaBuilder.struct();
+                for (DataField dataField : rowType.getFields()) {
+                    org.apache.kafka.connect.data.Schema fieldSchema =
+                            convertCDCDataTypeToDebeziumDataType(dataField.getType()).build();
+                    structBuilder.field(dataField.getName(), fieldSchema);
+                }
+                field = structBuilder;
+                break;
             case CHAR:
             case VARCHAR:
             default:
                 field = SchemaBuilder.string();
         }
 
-        if (columnType.isNullable()) {
-            field.optional();
-        } else {
-            field.required();
-        }
-        if (column.getDefaultValueExpression() != null) {
-            field.defaultValue(column.getDefaultValueExpression());
-        }
-        if (column.getComment() != null) {
-            field.doc(column.getComment());
-        }
         return field;
     }
 

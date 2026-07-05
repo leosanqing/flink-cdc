@@ -22,6 +22,7 @@ import org.apache.flink.cdc.common.event.TableId;
 import org.apache.flink.cdc.common.schema.Column;
 import org.apache.flink.cdc.common.schema.Schema;
 import org.apache.flink.cdc.common.types.BigIntType;
+import org.apache.flink.cdc.common.types.BinaryType;
 import org.apache.flink.cdc.common.types.BooleanType;
 import org.apache.flink.cdc.common.types.CharType;
 import org.apache.flink.cdc.common.types.DataType;
@@ -33,8 +34,10 @@ import org.apache.flink.cdc.common.types.FloatType;
 import org.apache.flink.cdc.common.types.IntType;
 import org.apache.flink.cdc.common.types.LocalZonedTimestampType;
 import org.apache.flink.cdc.common.types.SmallIntType;
+import org.apache.flink.cdc.common.types.TimeType;
 import org.apache.flink.cdc.common.types.TimestampType;
 import org.apache.flink.cdc.common.types.TinyIntType;
+import org.apache.flink.cdc.common.types.VarBinaryType;
 import org.apache.flink.cdc.common.types.VarCharType;
 
 import com.starrocks.connector.flink.catalog.StarRocksColumn;
@@ -43,6 +46,8 @@ import com.starrocks.connector.flink.catalog.StarRocksTable;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
+import java.time.temporal.ChronoField;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -90,7 +95,11 @@ public class StarRocksUtils {
                             .setDefaultValue(
                                     convertInvalidTimestampDefaultValue(
                                             column.getDefaultValueExpression(), column.getType()));
-            toStarRocksDataType(column, i < primaryKeyCount, builder);
+            toStarRocksDataType(
+                    column,
+                    i < primaryKeyCount,
+                    builder,
+                    tableCreateConfig.getUnicodeCharMaxBytes());
             starRocksColumns.add(builder.build());
         }
 
@@ -114,14 +123,38 @@ public class StarRocksUtils {
     /** Convert CDC data type to StarRocks data type. */
     public static void toStarRocksDataType(
             DataType cdcDataType, boolean isPrimaryKeys, StarRocksColumn.Builder builder) {
+        toStarRocksDataType(
+                cdcDataType,
+                isPrimaryKeys,
+                builder,
+                StarRocksDataSinkOptions.UNICODE_CHAR_MAX_BYTES.defaultValue());
+    }
+
+    public static void toStarRocksDataType(
+            DataType cdcDataType,
+            boolean isPrimaryKeys,
+            StarRocksColumn.Builder builder,
+            int unicodeCharMaxBytes) {
         CdcDataTypeTransformer dataTypeTransformer =
-                new CdcDataTypeTransformer(isPrimaryKeys, builder);
+                new CdcDataTypeTransformer(isPrimaryKeys, builder, unicodeCharMaxBytes);
         cdcDataType.accept(dataTypeTransformer);
     }
 
     public static void toStarRocksDataType(
             Column cdcColumn, boolean isPrimaryKeys, StarRocksColumn.Builder builder) {
-        toStarRocksDataType(cdcColumn.getType(), isPrimaryKeys, builder);
+        toStarRocksDataType(
+                cdcColumn,
+                isPrimaryKeys,
+                builder,
+                StarRocksDataSinkOptions.UNICODE_CHAR_MAX_BYTES.defaultValue());
+    }
+
+    public static void toStarRocksDataType(
+            Column cdcColumn,
+            boolean isPrimaryKeys,
+            StarRocksColumn.Builder builder,
+            int unicodeCharMaxBytes) {
+        toStarRocksDataType(cdcColumn.getType(), isPrimaryKeys, builder, unicodeCharMaxBytes);
     }
 
     /** Format DATE type data. */
@@ -131,6 +164,35 @@ public class StarRocksUtils {
     /** Format timestamp-related type data. */
     private static final DateTimeFormatter DATETIME_FORMATTER =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    /** Format TIME type data. */
+    private static final DateTimeFormatter TIME_FORMATTER =
+            new DateTimeFormatterBuilder().appendPattern("HH:mm:ss").toFormatter();
+
+    private static final DateTimeFormatter[] TIME_FORMATTERS = new DateTimeFormatter[10];
+
+    private static DateTimeFormatter timeFormatter(int precision) {
+        if (precision <= 0) {
+            return TIME_FORMATTER;
+        }
+        if (precision < TIME_FORMATTERS.length) {
+            DateTimeFormatter formatter = TIME_FORMATTERS[precision];
+            if (formatter == null) {
+                formatter =
+                        new DateTimeFormatterBuilder()
+                                .appendPattern("HH:mm:ss")
+                                .appendFraction(
+                                        ChronoField.NANO_OF_SECOND, precision, precision, true)
+                                .toFormatter();
+                TIME_FORMATTERS[precision] = formatter;
+            }
+            return formatter;
+        }
+        return new DateTimeFormatterBuilder()
+                .appendPattern("HH:mm:ss")
+                .appendFraction(ChronoField.NANO_OF_SECOND, precision, precision, true)
+                .toFormatter();
+    }
 
     /**
      * Creates an accessor for getting elements in an internal RecordData structure at the given
@@ -183,6 +245,17 @@ public class StarRocksUtils {
                 fieldGetter =
                         record -> record.getDate(fieldPos).toLocalDate().format(DATE_FORMATTER);
                 break;
+            case BINARY:
+            case VARBINARY:
+                fieldGetter = record -> record.getBinary(fieldPos);
+                break;
+            case TIME_WITHOUT_TIME_ZONE:
+                fieldGetter =
+                        record ->
+                                record.getTime(fieldPos)
+                                        .toLocalTime()
+                                        .format(timeFormatter(getPrecision(fieldType)));
+                break;
             case TIMESTAMP_WITHOUT_TIME_ZONE:
                 fieldGetter =
                         record ->
@@ -234,6 +307,7 @@ public class StarRocksUtils {
     public static final String STRING = "STRING";
     public static final String DATE = "DATE";
     public static final String DATETIME = "DATETIME";
+    public static final String VARBINARY = "VARBINARY";
     public static final String JSON = "JSON";
 
     /** Max size of char type of StarRocks. */
@@ -242,16 +316,29 @@ public class StarRocksUtils {
     /** Max size of varchar type of StarRocks. */
     public static final int MAX_VARCHAR_SIZE = 1048576;
 
+    /** Max size of varbinary type of StarRocks. */
+    public static final int MAX_VARBINARY_SIZE = 1048576;
+
     /** Transforms CDC {@link DataType} to StarRocks data type. */
     public static class CdcDataTypeTransformer
             extends DataTypeDefaultVisitor<StarRocksColumn.Builder> {
 
         private final StarRocksColumn.Builder builder;
         private final boolean isPrimaryKeys;
+        private final int unicodeCharMaxBytes;
 
         public CdcDataTypeTransformer(boolean isPrimaryKeys, StarRocksColumn.Builder builder) {
+            this(
+                    isPrimaryKeys,
+                    builder,
+                    StarRocksDataSinkOptions.UNICODE_CHAR_MAX_BYTES.defaultValue());
+        }
+
+        public CdcDataTypeTransformer(
+                boolean isPrimaryKeys, StarRocksColumn.Builder builder, int unicodeCharMaxBytes) {
             this.isPrimaryKeys = isPrimaryKeys;
             this.builder = builder;
+            this.unicodeCharMaxBytes = unicodeCharMaxBytes;
         }
 
         @Override
@@ -330,13 +417,13 @@ public class StarRocksUtils {
         @Override
         public StarRocksColumn.Builder visit(CharType charType) {
             // CDC and StarRocks use different units for the length. It's the number
-            // of characters in CDC, and the number of bytes in StarRocks. One chinese
-            // character will use 3 bytes because it uses UTF-8, so the length of StarRocks
-            // char type should be three times as that of CDC char type. Specifically, if
-            // the length of StarRocks exceeds the MAX_CHAR_SIZE, map CDC char type to StarRocks
-            // varchar type
+            // of characters in CDC, and the number of bytes in StarRocks. The number
+            // of bytes needed for each character depends on the upstream encoding, so
+            // the length of StarRocks char type should be scaled by unicodeCharMaxBytes.
+            // Specifically, if the length of StarRocks exceeds the MAX_CHAR_SIZE, map
+            // CDC char type to StarRocks varchar type.
             int length = charType.getLength();
-            long starRocksLength = length * 3L;
+            long starRocksLength = (long) length * unicodeCharMaxBytes;
             // In the StarRocks, The primary key columns can be any of the following data types:
             // BOOLEAN, TINYINT, SMALLINT, INT, BIGINT, LARGEINT, STRING, VARCHAR, DATE, and
             // DATETIME, But it doesn't include CHAR. When a char type appears in the primary key of
@@ -356,11 +443,11 @@ public class StarRocksUtils {
         @Override
         public StarRocksColumn.Builder visit(VarCharType varCharType) {
             // CDC and StarRocks use different units for the length. It's the number
-            // of characters in CDC, and the number of bytes in StarRocks. One chinese
-            // character will use 3 bytes because it uses UTF-8, so the length of StarRocks
-            // varchar type should be three times as that of CDC varchar type.
+            // of characters in CDC, and the number of bytes in StarRocks. The number
+            // of bytes needed for each character depends on the upstream encoding, so
+            // the length of StarRocks varchar type should be scaled by unicodeCharMaxBytes.
             int length = varCharType.getLength();
-            long starRocksLength = length * 3L;
+            long starRocksLength = (long) length * unicodeCharMaxBytes;
             builder.setDataType(VARCHAR);
             builder.setNullable(varCharType.isNullable());
             builder.setColumnSize((int) Math.min(starRocksLength, MAX_VARCHAR_SIZE));
@@ -368,9 +455,40 @@ public class StarRocksUtils {
         }
 
         @Override
+        public StarRocksColumn.Builder visit(BinaryType binaryType) {
+            builder.setDataType(VARBINARY);
+            builder.setNullable(binaryType.isNullable());
+            builder.setColumnSize(Math.min(binaryType.getLength(), MAX_VARBINARY_SIZE));
+            return builder;
+        }
+
+        @Override
+        public StarRocksColumn.Builder visit(VarBinaryType varBinaryType) {
+            builder.setDataType(VARBINARY);
+            builder.setNullable(varBinaryType.isNullable());
+            builder.setColumnSize(Math.min(varBinaryType.getLength(), MAX_VARBINARY_SIZE));
+            return builder;
+        }
+
+        @Override
         public StarRocksColumn.Builder visit(DateType dateType) {
             builder.setDataType(DATE);
             builder.setNullable(dateType.isNullable());
+            return builder;
+        }
+
+        @Override
+        public StarRocksColumn.Builder visit(TimeType timeType) {
+            // StarRocks does not support TIME type, so map it to VARCHAR.
+            // Format: HH:mm:ss for precision 0, HH:mm:ss.<p digits> for precision > 0
+            // Maximum length: 8 (HH:mm:ss) + 1 (.) + precision = 8 + 1 + precision
+            // For precision 0: "HH:mm:ss" = 8 characters
+            // For precision > 0: "HH:mm:ss." + precision digits
+            builder.setDataType(VARCHAR);
+            builder.setNullable(timeType.isNullable());
+            int precision = timeType.getPrecision();
+            int length = precision > 0 ? 8 + 1 + precision : 8;
+            builder.setColumnSize(length);
             return builder;
         }
 
@@ -404,7 +522,8 @@ public class StarRocksUtils {
                 || dataType instanceof org.apache.flink.cdc.common.types.TimestampType
                 || dataType instanceof org.apache.flink.cdc.common.types.ZonedTimestampType) {
 
-            if (INVALID_OR_MISSING_DATATIME.equals(defaultValue)) {
+            if (INVALID_OR_MISSING_DATATIME.equals(defaultValue)
+                    || defaultValue.startsWith(INVALID_OR_MISSING_DATATIME)) {
                 return DEFAULT_DATETIME;
             }
         }

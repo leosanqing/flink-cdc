@@ -128,15 +128,15 @@ pipeline:
       <td>sink.connect.timeout-ms</td>
       <td>optional</td>
       <td style="word-wrap: break-word;">30000</td>
-      <td>String</td>
+      <td>Integer</td>
       <td>与 FE 建立 HTTP 连接的超时时间。取值范围：[100, 60000]。</td>
     </tr>
     <tr>
       <td>sink.wait-for-continue.timeout-ms</td>
       <td>optional</td>
       <td style="word-wrap: break-word;">30000</td>
-      <td>String</td>
-      <td>等待 FE HTTP 100-continue 应答的超时时间。取值范围：[3000, 60000]。</td>
+      <td>Integer</td>
+      <td>等待 FE HTTP 100-continue 应答的超时时间。取值范围：[3000, 600000]。</td>
     </tr>
     <tr>
       <td>sink.buffer-flush.max-bytes</td>
@@ -175,6 +175,13 @@ pipeline:
       <td>at-least-once 下是否使用 transaction stream load。</td>
     </tr>
     <tr>
+      <td>sink.metric.histogram-window-size</td>
+      <td>optional</td>
+      <td style="word-wrap: break-word;">100</td>
+      <td>Integer</td>
+      <td>直方图指标的窗口大小。</td>
+    </tr>
+    <tr>
       <td>sink.properties.*</td>
       <td>optional</td>
       <td style="word-wrap: break-word;">(none)</td>
@@ -209,6 +216,13 @@ pipeline:
       <td>StarRocks 侧执行 schema change 的超时时间，必须是秒的整数倍。超时后 StarRocks 将会取消 schema change，从而导致作业失败。</td>
     </tr>
     <tr>
+      <td>unicode-char.max-bytes</td>
+      <td>optional</td>
+      <td style="word-wrap: break-word;">3</td>
+      <td>Integer</td>
+      <td>将上游 CHAR 和 VARCHAR 类型映射到 StarRocks 时，为每个字符分配的最大字节数。由于 StarRocks 的长度以字节为单位，如果上游使用 utf8mb4，建议将该选项设置为 4，以避免低估目标列长度。默认值仍为 3，以保持向后兼容。</td>
+    </tr>
+    <tr>
       <td>sink.socket.timeout-ms</td>
       <td>optional</td>
       <td style="word-wrap: break-word;">-1</td>
@@ -233,7 +247,7 @@ pipeline:
     自动设置分桶数量</a>。对于 StarRocks 2.5 之前的版本必须设置，否则无法自动创建表。
 
 * 对于表结构变更同步
-  * 只支持增删列
+  * 支持创建/删除/清空表，增加/删除/重命名列，修改列类型
   * 新增列只能添加到最后一列
   * 如果使用 StarRocks 3.2 及之后版本，并且通过连接器来自动建表, 可以通过配置 `table.create.properties.fast_schema_evolution` 为 `true`
     来加速 StarRocks 执行变更。
@@ -298,6 +312,11 @@ pipeline:
       <td></td>
     </tr>
     <tr>
+      <td>TIME</td>
+      <td>VARCHAR</td>
+      <td>StarRocks 不支持 TIME 类型，因此映射为 VARCHAR。TIME(p) 值以字符串形式存储：当 p = 0 时格式为 "HH:mm:ss"，当 p > 0 时格式为 "HH:mm:ss.&lt;p 位小数&gt;"（例如 p = 3 时为 "HH:mm:ss.SSS"）。</td>
+    </tr>
+    <tr>
       <td>TIMESTAMP</td>
       <td>DATETIME</td>
       <td></td>
@@ -308,22 +327,34 @@ pipeline:
       <td></td>
     </tr>
     <tr>
-      <td>CHAR(n) where n <= 85</td>
-      <td>CHAR(n * 3)</td>
-      <td>CDC 中长度表示字符数，而 StarRocks 中长度表示字节数。根据 UTF-8 编码，一个中文字符占用三个字节，因此 CDC 中的长度对应到 StarRocks
-          中为 n * 3。由于 StarRocks CHAR 类型的最大长度为255，所以只有当 CDC 中长度不超过85时，才将 CDC CHAR 映射到 StarRocks CHAR。</td>
+      <td>CHAR(n)，且 n * unicode-char.max-bytes <= 255，并且不是主键列</td>
+      <td>CHAR(n * unicode-char.max-bytes)</td>
+      <td>CDC 中长度表示字符数，而 StarRocks 中长度表示字节数。StarRocks 的长度按 n * unicode-char.max-bytes 计算。由于 StarRocks CHAR 类型的最大长度为 255，只有当计算后的长度不超过 255 时，才将 CDC CHAR 映射到 StarRocks CHAR。如果该列是主键列，则会映射为 VARCHAR。</td>
     </tr>
     <tr>
-      <td>CHAR(n) where n > 85</td>
-      <td>VARCHAR(n * 3)</td>
-      <td>CDC 中长度表示字符数，而 StarRocks 中长度表示字节数。根据 UTF-8 编码，一个中文字符占用三个字节，因此 CDC 中的长度对应到 StarRocks
-          中为 n * 3。由于 StarRocks CHAR 类型的最大长度为255，所以当 CDC 中长度超过85时，才将 CDC CHAR 映射到 StarRocks VARCHAR。</td>
+      <td>CHAR(n)，且 n * unicode-char.max-bytes > 255，或主键列</td>
+      <td>VARCHAR(min(n * unicode-char.max-bytes, 1048576))</td>
+      <td>CDC 中长度表示字符数，而 StarRocks 中长度表示字节数。StarRocks 的长度按 n * unicode-char.max-bytes 计算。由于 StarRocks CHAR 类型的最大长度为 255，当计算后的长度超过 255 时，会将 CDC CHAR 映射到 StarRocks VARCHAR。主键 CHAR 列也会映射为 VARCHAR。</td>
     </tr>
     <tr>
       <td>VARCHAR(n)</td>
-      <td>VARCHAR(n * 3)</td>
-      <td>CDC 中长度表示字符数，而 StarRocks 中长度表示字节数。根据 UTF-8 编码，一个中文字符占用三个字节，因此 CDC 中的长度对应到 StarRocks
-          中为 n * 3。</td>
+      <td>VARCHAR(min(n * unicode-char.max-bytes, 1048576))</td>
+      <td>CDC 中长度表示字符数，而 StarRocks 中长度表示字节数。StarRocks 的长度按 n * unicode-char.max-bytes 计算，并且最大不会超过 1048576。</td>
+    </tr>
+    <tr>
+      <td>BINARY(n)</td>
+      <td>VARBINARY(min(n,1048576))</td>
+      <td>长度上限为 1048576。</td>
+    </tr>
+    <tr>
+      <td>VARBINARY(n)</td>
+      <td>VARBINARY(min(n,1048576))</td>
+      <td>长度上限为 1048576。</td>
+    </tr>
+    <tr>
+      <td>BYTES</td>
+      <td>VARBINARY(1048576)</td>
+      <td>BYTES 映射为最大长度为 1048576 的 VARBINARY。</td>
     </tr>
     </tbody>
 </table>

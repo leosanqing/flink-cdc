@@ -86,8 +86,8 @@ public class PreCommitOperator
                                     true,
                                     context.isRestored(),
                                     context.getOperatorStateStore(),
-                                    getRuntimeContext().getNumberOfParallelSubtasks(),
-                                    getRuntimeContext().getIndexOfThisSubtask()));
+                                    getRuntimeContext().getTaskInfo().getNumberOfParallelSubtasks(),
+                                    getRuntimeContext().getTaskInfo().getIndexOfThisSubtask()));
         }
     }
 
@@ -115,8 +115,7 @@ public class PreCommitOperator
                             multiTableCommittable.getDatabase(),
                             multiTableCommittable.getTable(),
                             checkpointId,
-                            multiTableCommittable.kind(),
-                            multiTableCommittable.wrappedCommittable()));
+                            multiTableCommittable.commitMessage()));
         }
     }
 

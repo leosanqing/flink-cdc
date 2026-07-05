@@ -128,14 +128,14 @@ pipeline:
       <td>sink.connect.timeout-ms</td>
       <td>optional</td>
       <td style="word-wrap: break-word;">30000</td>
-      <td>String</td>
+      <td>Integer</td>
       <td>The timeout for establishing HTTP connection. Valid values: 100 to 60000.</td>
     </tr>
     <tr>
       <td>sink.wait-for-continue.timeout-ms</td>
       <td>optional</td>
       <td style="word-wrap: break-word;">30000</td>
-      <td>String</td>
+      <td>Integer</td>
       <td>Timeout in millisecond to wait for 100-continue response from FE http server.
             Valid values: 3000 to 600000.</td>
     </tr>
@@ -178,6 +178,13 @@ pipeline:
       <td>Whether to use transaction stream load for at-least-once when it's available.</td>
     </tr>
     <tr>
+      <td>sink.metric.histogram-window-size</td>
+      <td>optional</td>
+      <td style="word-wrap: break-word;">100</td>
+      <td>Integer</td>
+      <td>Window size of histogram metrics.</td>
+    </tr>
+    <tr>
       <td>sink.properties.*</td>
       <td>optional</td>
       <td style="word-wrap: break-word;">(none)</td>
@@ -216,6 +223,13 @@ pipeline:
           cause the sink failure. </td>
     </tr>
     <tr>
+      <td>unicode-char.max-bytes</td>
+      <td>optional</td>
+      <td style="word-wrap: break-word;">3</td>
+      <td>Integer</td>
+      <td>The maximum number of bytes allocated for each upstream character when mapping CHAR and VARCHAR types to StarRocks, whose length is measured in bytes. If the upstream source uses utf8mb4, set this option to 4 to avoid underestimating column lengths. The default value of 3 is retained for backward compatibility.</td>
+    </tr>
+    <tr>
       <td>sink.socket.timeout-ms</td>
       <td>optional</td>
       <td style="word-wrap: break-word;">-1</td>
@@ -241,7 +255,7 @@ pipeline:
     otherwise you must set the option.
 
 * For schema change synchronization
-  * only supports add/drop columns
+  * supports create/drop/truncate table, add/drop/rename columns and alter column types
   * the new column will always be added to the last position
   * if your StarRocks version is 3.2 or later, and using the connector to create table automatically,
     you can set `table.create.properties.fast_schema_evolution` to `true` to speed up the schema change.
@@ -307,6 +321,11 @@ pipeline:
       <td></td>
     </tr>
     <tr>
+      <td>TIME</td>
+      <td>VARCHAR</td>
+      <td>StarRocks does not support TIME type, so it is mapped to VARCHAR. TIME values are stored as strings in format "HH:mm:ss" when the precision p = 0, or "HH:mm:ss.&lt;p digits&gt;" when p &gt; 0 (for example, p = 3 uses "HH:mm:ss.SSS").</td>
+    </tr>
+    <tr>
       <td>TIMESTAMP</td>
       <td>DATETIME</td>
       <td></td>
@@ -317,24 +336,34 @@ pipeline:
       <td></td>
     </tr>
     <tr>
-      <td>CHAR(n) where n <= 85</td>
-      <td>CHAR(n * 3)</td>
-      <td>CDC defines the length by characters, and StarRocks defines it by bytes. According to UTF-8, one Chinese 
-        character is equal to three bytes, so the length for StarRocks is n * 3. Because the max length of StarRocks
-        CHAR is 255, map CDC CHAR to StarRocks CHAR only when the CDC length is no larger than 85.</td>
+      <td>CHAR(n) where n * unicode-char.max-bytes <= 255 and not primary key</td>
+      <td>CHAR(n * unicode-char.max-bytes)</td>
+      <td>CDC defines the length by characters, and StarRocks defines it by bytes. The StarRocks length is calculated as n * unicode-char.max-bytes. Because the max length of StarRocks CHAR is 255, map CDC CHAR to StarRocks CHAR only when the calculated length is no larger than 255. If the column is part of the primary key, it is mapped to VARCHAR instead.</td>
     </tr>
     <tr>
-      <td>CHAR(n) where n > 85</td>
-      <td>VARCHAR(n * 3)</td>
-      <td>CDC defines the length by characters, and StarRocks defines it by bytes. According to UTF-8, one Chinese 
-        character is equal to three bytes, so the length for StarRocks is n * 3. Because the max length of StarRocks
-        CHAR is 255, map CDC CHAR to StarRocks VARCHAR if the CDC length is larger than 85.</td>
+      <td>CHAR(n) where n * unicode-char.max-bytes > 255, or primary key</td>
+      <td>VARCHAR(min(n * unicode-char.max-bytes, 1048576))</td>
+      <td>CDC defines the length by characters, and StarRocks defines it by bytes. The StarRocks length is calculated as n * unicode-char.max-bytes. Because the max length of StarRocks CHAR is 255, map CDC CHAR to StarRocks VARCHAR when the calculated length exceeds 255. Primary key CHAR columns are also mapped to VARCHAR.</td>
     </tr>
     <tr>
       <td>VARCHAR(n)</td>
-      <td>VARCHAR(n * 3)</td>
-      <td>CDC defines the length by characters, and StarRocks defines it by bytes. According to UTF-8, one Chinese 
-        character is equal to three bytes, so the length for StarRocks is n * 3.</td>
+      <td>VARCHAR(min(n * unicode-char.max-bytes, 1048576))</td>
+      <td>CDC defines the length by characters, and StarRocks defines it by bytes. The StarRocks length is calculated as n * unicode-char.max-bytes and capped at 1048576.</td>
+    </tr>
+    <tr>
+      <td>BINARY(n)</td>
+      <td>VARBINARY(min(n,1048576))</td>
+      <td>The length is capped to 1048576.</td>
+    </tr>
+    <tr>
+      <td>VARBINARY(n)</td>
+      <td>VARBINARY(min(n,1048576))</td>
+      <td>The length is capped to 1048576.</td>
+    </tr>
+    <tr>
+      <td>BYTES</td>
+      <td>VARBINARY(1048576)</td>
+      <td>BYTES is mapped to VARBINARY with max length 1048576.</td>
     </tr>
     </tbody>
 </table>

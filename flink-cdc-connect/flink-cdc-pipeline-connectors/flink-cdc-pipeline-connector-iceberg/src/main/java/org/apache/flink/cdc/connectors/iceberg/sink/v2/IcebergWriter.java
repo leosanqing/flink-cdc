@@ -20,12 +20,14 @@ package org.apache.flink.cdc.connectors.iceberg.sink.v2;
 import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.connector.sink2.CommittingSinkWriter;
 import org.apache.flink.api.connector.sink2.SinkWriter;
+import org.apache.flink.api.connector.sink2.StatefulSinkWriter;
 import org.apache.flink.cdc.common.event.DataChangeEvent;
 import org.apache.flink.cdc.common.event.Event;
 import org.apache.flink.cdc.common.event.SchemaChangeEvent;
 import org.apache.flink.cdc.common.event.TableId;
 import org.apache.flink.cdc.common.schema.Schema;
 import org.apache.flink.cdc.common.utils.SchemaUtils;
+import org.apache.flink.cdc.connectors.iceberg.sink.utils.HadoopConfUtils;
 import org.apache.flink.cdc.connectors.iceberg.sink.utils.RowDataUtils;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.logical.RowType;
@@ -46,12 +48,15 @@ import java.io.IOException;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 /** A {@link SinkWriter} for Apache Iceberg. */
-public class IcebergWriter implements CommittingSinkWriter<Event, WriteResultWrapper> {
+public class IcebergWriter
+        implements CommittingSinkWriter<Event, WriteResultWrapper>,
+                StatefulSinkWriter<Event, IcebergWriterState> {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(IcebergWriter.class);
 
@@ -67,6 +72,11 @@ public class IcebergWriter implements CommittingSinkWriter<Event, WriteResultWra
 
     private final List<WriteResultWrapper> temporaryWriteResult;
 
+    /**
+     * Per-table batch index; incremented on each schema-change flush, even when no writer exists.
+     */
+    private Map<TableId, Integer> tableBatchIndexMap;
+
     private Catalog catalog;
 
     private final int taskId;
@@ -75,26 +85,58 @@ public class IcebergWriter implements CommittingSinkWriter<Event, WriteResultWra
 
     private final ZoneId zoneId;
 
+    private long lastCheckpointId;
+
+    private final String jobId;
+
+    private final String operatorId;
+
     public IcebergWriter(
-            Map<String, String> catalogOptions, int taskId, int attemptId, ZoneId zoneId) {
+            Map<String, String> catalogOptions,
+            int taskId,
+            int attemptId,
+            ZoneId zoneId,
+            long lastCheckpointId,
+            String jobId,
+            String operatorId,
+            Map<String, String> hadoopConfOptions) {
+        Configuration configuration = HadoopConfUtils.createConfiguration(hadoopConfOptions);
         catalog =
                 CatalogUtil.buildIcebergCatalog(
-                        this.getClass().getSimpleName(), catalogOptions, new Configuration());
+                        this.getClass().getSimpleName(), catalogOptions, configuration);
         writerFactoryMap = new HashMap<>();
         writerMap = new HashMap<>();
         schemaMap = new HashMap<>();
+        tableBatchIndexMap = new HashMap<>();
         temporaryWriteResult = new ArrayList<>();
         this.taskId = taskId;
         this.attemptId = attemptId;
         this.zoneId = zoneId;
+        this.lastCheckpointId = lastCheckpointId;
+        this.jobId = jobId;
+        this.operatorId = operatorId;
+        LOGGER.info(
+                "IcebergWriter created, taskId: {}, attemptId: {}, lastCheckpointId: {}, jobId: {}, operatorId: {}",
+                taskId,
+                attemptId,
+                lastCheckpointId,
+                jobId,
+                operatorId);
     }
 
     @Override
-    public Collection<WriteResultWrapper> prepareCommit() throws IOException, InterruptedException {
+    public List<IcebergWriterState> snapshotState(long checkpointId) {
+        return Collections.singletonList(new IcebergWriterState(jobId, operatorId));
+    }
+
+    @Override
+    public Collection<WriteResultWrapper> prepareCommit() throws IOException {
         List<WriteResultWrapper> list = new ArrayList<>();
         list.addAll(temporaryWriteResult);
         list.addAll(getWriteResult());
         temporaryWriteResult.clear();
+        tableBatchIndexMap.clear();
+        lastCheckpointId++;
         return list;
     }
 
@@ -131,6 +173,11 @@ public class IcebergWriter implements CommittingSinkWriter<Event, WriteResultWra
         } else {
             SchemaChangeEvent schemaChangeEvent = (SchemaChangeEvent) event;
             TableId tableId = schemaChangeEvent.tableId();
+            // Flush only when the table is already known; skip on initial CreateTableEvent since
+            // no data has been written yet and there is nothing to split.
+            if (schemaMap.containsKey(tableId)) {
+                flushTableWriter(tableId);
+            }
             TableSchemaWrapper tableSchemaWrapper = schemaMap.get(tableId);
 
             Schema newSchema =
@@ -144,15 +191,46 @@ public class IcebergWriter implements CommittingSinkWriter<Event, WriteResultWra
 
     @Override
     public void flush(boolean flush) throws IOException {
-        // Notice: flush method may be called many times during one checkpoint.
-        temporaryWriteResult.addAll(getWriteResult());
+        // Clear the factory cache so the next write picks up the latest catalog schema.
+        // Writers keep running; schema-change splits are handled in flushTableWriter.
+        writerFactoryMap.clear();
+    }
+
+    private void flushTableWriter(TableId tableId) throws IOException {
+        TaskWriter<RowData> writer = writerMap.remove(tableId);
+        // Advance even when no writer exists, to keep batchIndex in sync across subtasks.
+        int batchIndex = tableBatchIndexMap.getOrDefault(tableId, 0);
+        tableBatchIndexMap.put(tableId, batchIndex + 1);
+        if (writer == null) {
+            return;
+        }
+        WriteResultWrapper writeResultWrapper =
+                new WriteResultWrapper(
+                        writer.complete(),
+                        tableId,
+                        lastCheckpointId + 1,
+                        jobId,
+                        operatorId,
+                        batchIndex);
+        temporaryWriteResult.add(writeResultWrapper);
+        LOGGER.info(writeResultWrapper.buildDescription());
+        writerFactoryMap.remove(tableId);
     }
 
     private List<WriteResultWrapper> getWriteResult() throws IOException {
+        long currentCheckpointId = lastCheckpointId + 1;
         List<WriteResultWrapper> writeResults = new ArrayList<>();
         for (Map.Entry<TableId, TaskWriter<RowData>> entry : writerMap.entrySet()) {
+            TableId tableId = entry.getKey();
+            int batchIndex = tableBatchIndexMap.getOrDefault(tableId, 0);
             WriteResultWrapper writeResultWrapper =
-                    new WriteResultWrapper(entry.getValue().complete(), entry.getKey());
+                    new WriteResultWrapper(
+                            entry.getValue().complete(),
+                            tableId,
+                            currentCheckpointId,
+                            jobId,
+                            operatorId,
+                            batchIndex);
             writeResults.add(writeResultWrapper);
             LOGGER.info(writeResultWrapper.buildDescription());
         }
@@ -182,6 +260,11 @@ public class IcebergWriter implements CommittingSinkWriter<Event, WriteResultWra
         if (writerFactoryMap != null) {
             writerFactoryMap.clear();
             writerFactoryMap = null;
+        }
+
+        if (tableBatchIndexMap != null) {
+            tableBatchIndexMap.clear();
+            tableBatchIndexMap = null;
         }
 
         catalog = null;

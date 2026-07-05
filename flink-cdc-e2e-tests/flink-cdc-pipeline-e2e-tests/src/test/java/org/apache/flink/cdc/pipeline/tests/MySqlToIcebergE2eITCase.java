@@ -18,8 +18,6 @@
 package org.apache.flink.cdc.pipeline.tests;
 
 import org.apache.flink.cdc.common.test.utils.TestUtils;
-import org.apache.flink.cdc.connectors.mysql.testutils.MySqlContainer;
-import org.apache.flink.cdc.connectors.mysql.testutils.MySqlVersion;
 import org.apache.flink.cdc.connectors.mysql.testutils.UniqueDatabase;
 import org.apache.flink.cdc.pipeline.tests.utils.PipelineTestEnvironment;
 import org.apache.flink.cdc.pipeline.tests.utils.TarballFetcher;
@@ -43,7 +41,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.testcontainers.containers.BindMode;
 import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.containers.output.ToStringConsumer;
 import org.testcontainers.lifecycle.Startables;
 
@@ -75,20 +72,6 @@ public class MySqlToIcebergE2eITCase extends PipelineTestEnvironment {
     private static final Logger LOG = LoggerFactory.getLogger(MySqlToIcebergE2eITCase.class);
 
     @TempDir public Path temporaryFolder;
-
-    @org.testcontainers.junit.jupiter.Container
-    public static final MySqlContainer MYSQL =
-            (MySqlContainer)
-                    new MySqlContainer(
-                                    MySqlVersion.V8_0) // v8 support both ARM and AMD architectures
-                            .withConfigurationOverride("docker/mysql/my.cnf")
-                            .withSetupSQL("docker/mysql/setup.sql")
-                            .withDatabaseName("flink-test")
-                            .withUsername("flinkuser")
-                            .withPassword("flinkpw")
-                            .withNetwork(NETWORK)
-                            .withNetworkAliases("mysql")
-                            .withLogConsumer(new Slf4jLogConsumer(LOG));
 
     protected final UniqueDatabase inventoryDatabase =
             new UniqueDatabase(MYSQL, "iceberg_inventory", MYSQL_TEST_USER, MYSQL_TEST_PASSWORD);
@@ -230,9 +213,24 @@ public class MySqlToIcebergE2eITCase extends PipelineTestEnvironment {
             stat.execute("UPDATE products SET description='Fay' WHERE id=106;");
             stat.execute("UPDATE products SET weight='5.125' WHERE id=107;");
 
+            // Same row updated twice before the schema-change flush below.
+            stat.execute("UPDATE products SET description='Bob v1' WHERE id=102;");
+            stat.execute("UPDATE products SET description='Bob v2' WHERE id=102;");
+
             // modify table schema
             stat.execute("ALTER TABLE products DROP COLUMN point_c;");
             stat.execute("DELETE FROM products WHERE id=101;");
+
+            // And once more after the flush; the latest value should win, no duplicate.
+            stat.execute("UPDATE products SET weight='1.125' WHERE id=102;");
+            // Update then delete the same row; it should be gone.
+            stat.execute("UPDATE products SET description='Cecily v2' WHERE id=103;");
+            stat.execute("DELETE FROM products WHERE id=103;");
+            // Delete then re-insert the same id; the re-inserted row should survive.
+            stat.execute("DELETE FROM products WHERE id=104;");
+            stat.execute(
+                    "INSERT INTO products (id, name, description, weight, enum_c, json_c) "
+                            + "VALUES (104, 'Four', 'Reborn', 9.875, 'white', null);");
 
             stat.execute(
                     "INSERT INTO products VALUES (default,'Eleven','Kryo',5.18, null, null);"); // 111
@@ -246,9 +244,8 @@ public class MySqlToIcebergE2eITCase extends PipelineTestEnvironment {
         List<String> recordsInSnapshotPhase =
                 new ArrayList<>(
                         Arrays.asList(
-                                "102, Two, Bob, 1.703, white, {\"key2\": \"value2\"}, null, null, null, null, null, null, null, null, null, null",
-                                "103, Three, Cecily, 4.105, red, {\"key3\": \"value3\"}, null, null, null, null, null, null, null, null, null, null",
-                                "104, Four, Derrida, 1.857, white, {\"key4\": \"value4\"}, null, null, null, null, null, null, null, null, null, null",
+                                "102, Two, Bob v2, 1.125, white, {\"key2\":\"value2\"}, null, null, null, null, null, null, null, null, null, null",
+                                "104, Four, Reborn, 9.875, white, null, null, null, null, null, null, null, null, null, null, null",
                                 "105, Five, Evelyn, 5.211, red, {\"K\": \"V\", \"k\": \"v\"}, null, null, null, null, null, null, null, null, null, null",
                                 "106, Six, Fay, 9.813, null, null, null, null, null, null, null, null, null, null, null, null",
                                 "107, Seven, Grace, 5.125, null, null, null, null, null, null, null, null, null, null, null, null",

@@ -17,9 +17,9 @@
 
 package org.apache.flink.cdc.connectors.paimon.sink.v2;
 
+import org.apache.flink.api.connector.sink2.CommittingSinkWriter;
 import org.apache.flink.api.connector.sink2.Sink;
 import org.apache.flink.api.connector.sink2.StatefulSinkWriter;
-import org.apache.flink.api.connector.sink2.TwoPhaseCommittingSink;
 import org.apache.flink.cdc.common.event.DataChangeEvent;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.io.disk.iomanager.IOManager;
@@ -36,6 +36,7 @@ import org.apache.paimon.flink.sink.StoreSinkWrite;
 import org.apache.paimon.memory.HeapMemorySegmentPool;
 import org.apache.paimon.memory.MemoryPoolFactory;
 import org.apache.paimon.options.Options;
+import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.ExecutorThreadFactory;
 import org.slf4j.Logger;
@@ -53,7 +54,7 @@ import java.util.stream.Collectors;
 
 /** A {@link Sink} to write {@link DataChangeEvent} to Paimon storage. */
 public class PaimonWriter<InputT>
-        implements TwoPhaseCommittingSink.PrecommittingSinkWriter<InputT, MultiTableCommittable>,
+        implements CommittingSinkWriter<InputT, MultiTableCommittable>,
                 StatefulSinkWriter<InputT, PaimonWriterState> {
 
     private static final Logger LOG = LoggerFactory.getLogger(PaimonWriter.class);
@@ -190,8 +191,12 @@ public class PaimonWriter<InputT>
                                 return storeSinkWrite;
                             });
             try {
+                int bucket =
+                        table.bucketMode() == BucketMode.POSTPONE_MODE
+                                ? BucketMode.POSTPONE_BUCKET
+                                : paimonEvent.getBucket();
                 for (GenericRow genericRow : paimonEvent.getGenericRows()) {
-                    write.write(genericRow, paimonEvent.getBucket());
+                    write.write(genericRow, bucket);
                 }
             } catch (Exception e) {
                 throw new IOException(e);
@@ -223,6 +228,9 @@ public class PaimonWriter<InputT>
         }
         if (compactExecutor != null) {
             compactExecutor.shutdownNow();
+        }
+        if (ioManager != null) {
+            ioManager.close();
         }
     }
 

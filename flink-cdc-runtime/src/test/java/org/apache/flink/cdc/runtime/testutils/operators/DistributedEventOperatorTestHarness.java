@@ -20,8 +20,10 @@ package org.apache.flink.cdc.runtime.testutils.operators;
 import org.apache.flink.cdc.common.event.Event;
 import org.apache.flink.cdc.common.event.FlushEvent;
 import org.apache.flink.cdc.common.event.TableId;
+import org.apache.flink.cdc.common.pipeline.RouteMode;
 import org.apache.flink.cdc.common.pipeline.SchemaChangeBehavior;
 import org.apache.flink.cdc.common.schema.Schema;
+import org.apache.flink.cdc.runtime.operators.AbstractStreamOperatorAdapter;
 import org.apache.flink.cdc.runtime.operators.schema.common.event.FlushSuccessEvent;
 import org.apache.flink.cdc.runtime.operators.schema.common.event.GetEvolvedSchemaRequest;
 import org.apache.flink.cdc.runtime.operators.schema.common.event.GetEvolvedSchemaResponse;
@@ -31,6 +33,7 @@ import org.apache.flink.cdc.runtime.operators.sink.SchemaEvolutionClient;
 import org.apache.flink.cdc.runtime.testutils.schema.CollectingMetadataApplier;
 import org.apache.flink.cdc.runtime.testutils.schema.TestingSchemaRegistryGateway;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.event.WatermarkEvent;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.TaskOperatorEventGateway;
 import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
@@ -66,7 +69,7 @@ import static org.apache.flink.cdc.runtime.operators.schema.common.CoordinationR
  * @param <E> Type of the event emitted by the operator
  */
 public class DistributedEventOperatorTestHarness<
-                OP extends AbstractStreamOperator<E>, E extends Event>
+                OP extends AbstractStreamOperatorAdapter<E>, E extends Event>
         implements AutoCloseable {
     public static final OperatorID SCHEMA_OPERATOR_ID = new OperatorID(15213L, 15513L);
 
@@ -78,15 +81,26 @@ public class DistributedEventOperatorTestHarness<
     private final TestingSchemaRegistryGateway schemaRegistryGateway;
     private final LinkedList<StreamRecord<E>> outputRecords = new LinkedList<>();
     private final MockedOperatorCoordinatorContext mockedContext;
+    private final int subtaskIndex;
 
     public DistributedEventOperatorTestHarness(OP operator, int numOutputs) {
-        this(operator, numOutputs, Duration.ofSeconds(3), Duration.ofMinutes(3));
+        this(operator, numOutputs, 0, Duration.ofSeconds(3), Duration.ofMinutes(3));
     }
 
     public DistributedEventOperatorTestHarness(
             OP operator, int numOutputs, Duration applyDuration, Duration rpcTimeout) {
+        this(operator, numOutputs, 0, applyDuration, rpcTimeout);
+    }
+
+    public DistributedEventOperatorTestHarness(
+            OP operator,
+            int numOutputs,
+            int subtaskIndex,
+            Duration applyDuration,
+            Duration rpcTimeout) {
         this.operator = operator;
         this.numOutputs = numOutputs;
+        this.subtaskIndex = subtaskIndex;
         this.mockedContext =
                 new MockedOperatorCoordinatorContext(
                         SCHEMA_OPERATOR_ID, Thread.currentThread().getContextClassLoader());
@@ -97,6 +111,7 @@ public class DistributedEventOperatorTestHarness<
                         Executors.newFixedThreadPool(1),
                         new CollectingMetadataApplier(applyDuration),
                         new ArrayList<>(),
+                        RouteMode.ALL_MATCH,
                         SchemaChangeBehavior.LENIENT,
                         rpcTimeout);
         this.schemaRegistryGateway = new TestingSchemaRegistryGateway(schemaCoordinator);
@@ -156,7 +171,7 @@ public class DistributedEventOperatorTestHarness<
 
     private void initializeOperator() throws Exception {
         operator.setup(
-                new MockStreamTask(schemaRegistryGateway),
+                new MockStreamTask(schemaRegistryGateway, subtaskIndex),
                 new MockStreamConfig(new Configuration(), numOutputs),
                 new EventCollectingOutput<>(outputRecords, schemaRegistryGateway));
         schemaRegistryGateway.sendOperatorEventToCoordinator(
@@ -196,6 +211,10 @@ public class DistributedEventOperatorTestHarness<
             throw new UnsupportedOperationException();
         }
 
+        public void emitWatermark(WatermarkEvent mark) {
+            throw new UnsupportedOperationException();
+        }
+
         @Override
         public void emitWatermarkStatus(WatermarkStatus watermarkStatus) {
             throw new UnsupportedOperationException();
@@ -219,9 +238,10 @@ public class DistributedEventOperatorTestHarness<
     }
 
     private static class MockStreamTask extends StreamTask<Event, AbstractStreamOperator<Event>> {
-        protected MockStreamTask(TestingSchemaRegistryGateway schemaRegistryGateway)
+        protected MockStreamTask(
+                TestingSchemaRegistryGateway schemaRegistryGateway, int subtaskIndex)
                 throws Exception {
-            super(new SchemaRegistryCoordinatingEnvironment(schemaRegistryGateway));
+            super(new SchemaRegistryCoordinatingEnvironment(schemaRegistryGateway, subtaskIndex));
         }
 
         @Override
@@ -232,7 +252,8 @@ public class DistributedEventOperatorTestHarness<
         private final TestingSchemaRegistryGateway schemaRegistryGateway;
 
         public SchemaRegistryCoordinatingEnvironment(
-                TestingSchemaRegistryGateway schemaRegistryGateway) {
+                TestingSchemaRegistryGateway schemaRegistryGateway, int subtaskIndex) {
+            super("test-task", 2, subtaskIndex, 2);
             this.schemaRegistryGateway = schemaRegistryGateway;
         }
 

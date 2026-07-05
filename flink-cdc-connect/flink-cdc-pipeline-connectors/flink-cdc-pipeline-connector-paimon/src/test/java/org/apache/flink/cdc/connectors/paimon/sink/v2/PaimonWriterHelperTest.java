@@ -33,6 +33,7 @@ import org.apache.flink.cdc.common.event.TableId;
 import org.apache.flink.cdc.common.schema.Schema;
 import org.apache.flink.cdc.common.types.DataTypes;
 import org.apache.flink.cdc.common.types.RowType;
+import org.apache.flink.cdc.common.types.variant.BinaryVariantInternalBuilder;
 import org.apache.flink.cdc.connectors.paimon.sink.PaimonMetadataApplier;
 import org.apache.flink.cdc.runtime.serializer.data.MapDataSerializer;
 import org.apache.flink.cdc.runtime.typeutils.BinaryRecordDataGenerator;
@@ -45,6 +46,7 @@ import org.apache.paimon.data.GenericRow;
 import org.apache.paimon.data.InternalMap;
 import org.apache.paimon.data.NestedRow;
 import org.apache.paimon.data.Timestamp;
+import org.apache.paimon.data.variant.GenericVariant;
 import org.apache.paimon.flink.FlinkCatalogFactory;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.table.Table;
@@ -54,6 +56,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.File;
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -68,7 +71,7 @@ class PaimonWriterHelperTest {
     @TempDir public static java.nio.file.Path temporaryFolder;
 
     @Test
-    void testConvertEventToGenericRowOfAllDataTypes() {
+    void testConvertEventToGenericRowOfAllDataTypes() throws IOException {
         RowType rowType =
                 RowType.of(
                         DataTypes.BOOLEAN(),
@@ -92,7 +95,8 @@ class PaimonWriterHelperTest {
                         DataTypes.TIMESTAMP(3),
                         DataTypes.TIMESTAMP_LTZ(),
                         DataTypes.TIMESTAMP_LTZ(3),
-                        DataTypes.STRING());
+                        DataTypes.STRING(),
+                        DataTypes.VARIANT());
         Object[] testData =
                 new Object[] {
                     true,
@@ -117,7 +121,9 @@ class PaimonWriterHelperTest {
                     TimestampData.fromTimestamp(java.sql.Timestamp.valueOf("2023-01-01 00:00:00")),
                     LocalZonedTimestampData.fromInstant(Instant.parse("2023-01-01T00:00:00.000Z")),
                     LocalZonedTimestampData.fromInstant(Instant.parse("2023-01-01T00:00:00.000Z")),
-                    null
+                    null,
+                    BinaryVariantInternalBuilder.parseJson(
+                            "{\"a\":1,\"b\":\"hello\",\"c\":3.1}", false)
                 };
         BinaryRecordData recordData = new BinaryRecordDataGenerator(rowType).generate(testData);
         Schema schema = Schema.newBuilder().fromRowDataType(rowType).build();
@@ -154,7 +160,8 @@ class PaimonWriterHelperTest {
                                         java.sql.Timestamp.valueOf("2023-01-01 00:00:00")),
                                 Timestamp.fromInstant(Instant.parse("2023-01-01T00:00:00.000Z")),
                                 Timestamp.fromInstant(Instant.parse("2023-01-01T00:00:00.000Z")),
-                                null));
+                                null,
+                                GenericVariant.fromJson("{\"a\":1,\"b\":\"hello\",\"c\":3.1}")));
     }
 
     @Test
@@ -191,6 +198,91 @@ class PaimonWriterHelperTest {
         dataChangeEvent = DataChangeEvent.replaceEvent(tableId, recordData, null);
         genericRow = PaimonWriterHelper.convertEventToGenericRow(dataChangeEvent, fieldGetters);
         Assertions.assertThat(genericRow.getRowKind()).isEqualTo(RowKind.INSERT);
+    }
+
+    @Test
+    void testConvertEventToFullGenericRowsOfDataChangeTypes() {
+        Schema schema =
+                Schema.newBuilder()
+                        .physicalColumn("col1", DataTypes.STRING())
+                        .physicalColumn("col2", DataTypes.STRING())
+                        .build();
+        List<RecordData.FieldGetter> fieldGetters =
+                PaimonWriterHelper.createFieldGetters(schema, ZoneId.systemDefault());
+        TableId tableId = TableId.parse("database.table");
+        BinaryRecordDataGenerator generator =
+                new BinaryRecordDataGenerator(RowType.of(DataTypes.STRING(), DataTypes.STRING()));
+        BinaryRecordData beforeData =
+                generator.generate(
+                        new Object[] {
+                            BinaryStringData.fromString("1"), BinaryStringData.fromString("old")
+                        });
+        BinaryRecordData afterData =
+                generator.generate(
+                        new Object[] {
+                            BinaryStringData.fromString("1"), BinaryStringData.fromString("new")
+                        });
+
+        // INSERT: single INSERT row regardless of hasPrimaryKey
+        DataChangeEvent dataChangeEvent = DataChangeEvent.insertEvent(tableId, afterData);
+        List<GenericRow> rows =
+                PaimonWriterHelper.convertEventToFullGenericRows(
+                        dataChangeEvent, fieldGetters, true);
+        Assertions.assertThat(rows).hasSize(1);
+        Assertions.assertThat(rows.get(0).getRowKind()).isEqualTo(RowKind.INSERT);
+
+        rows =
+                PaimonWriterHelper.convertEventToFullGenericRows(
+                        dataChangeEvent, fieldGetters, false);
+        Assertions.assertThat(rows).hasSize(1);
+        Assertions.assertThat(rows.get(0).getRowKind()).isEqualTo(RowKind.INSERT);
+
+        // REPLACE: single INSERT row regardless of hasPrimaryKey (same as INSERT)
+        dataChangeEvent = DataChangeEvent.replaceEvent(tableId, afterData, null);
+        rows =
+                PaimonWriterHelper.convertEventToFullGenericRows(
+                        dataChangeEvent, fieldGetters, true);
+        Assertions.assertThat(rows).hasSize(1);
+        Assertions.assertThat(rows.get(0).getRowKind()).isEqualTo(RowKind.UPDATE_AFTER);
+        Assertions.assertThat(rows.get(0).getString(1)).isEqualTo(BinaryString.fromString("new"));
+
+        rows =
+                PaimonWriterHelper.convertEventToFullGenericRows(
+                        dataChangeEvent, fieldGetters, false);
+        Assertions.assertThat(rows).hasSize(1);
+        Assertions.assertThat(rows.get(0).getRowKind()).isEqualTo(RowKind.UPDATE_AFTER);
+
+        // UPDATE with primary key: UPDATE_BEFORE + UPDATE_AFTER
+        dataChangeEvent = DataChangeEvent.updateEvent(tableId, beforeData, afterData);
+        rows =
+                PaimonWriterHelper.convertEventToFullGenericRows(
+                        dataChangeEvent, fieldGetters, true);
+        Assertions.assertThat(rows).hasSize(2);
+        Assertions.assertThat(rows.get(0).getRowKind()).isEqualTo(RowKind.UPDATE_BEFORE);
+        Assertions.assertThat(rows.get(0).getString(1)).isEqualTo(BinaryString.fromString("old"));
+        Assertions.assertThat(rows.get(1).getRowKind()).isEqualTo(RowKind.UPDATE_AFTER);
+        Assertions.assertThat(rows.get(1).getString(1)).isEqualTo(BinaryString.fromString("new"));
+
+        // UPDATE without primary key: only UPDATE_AFTER
+        rows =
+                PaimonWriterHelper.convertEventToFullGenericRows(
+                        dataChangeEvent, fieldGetters, false);
+        Assertions.assertThat(rows).hasSize(1);
+        Assertions.assertThat(rows.get(0).getRowKind()).isEqualTo(RowKind.UPDATE_AFTER);
+
+        // DELETE with primary key: single DELETE row
+        dataChangeEvent = DataChangeEvent.deleteEvent(tableId, beforeData);
+        rows =
+                PaimonWriterHelper.convertEventToFullGenericRows(
+                        dataChangeEvent, fieldGetters, true);
+        Assertions.assertThat(rows).hasSize(1);
+        Assertions.assertThat(rows.get(0).getRowKind()).isEqualTo(RowKind.DELETE);
+
+        // DELETE without primary key: empty (no rows)
+        rows =
+                PaimonWriterHelper.convertEventToFullGenericRows(
+                        dataChangeEvent, fieldGetters, false);
+        Assertions.assertThat(rows).isEmpty();
     }
 
     @Test
@@ -368,6 +460,7 @@ class PaimonWriterHelperTest {
                         .physicalColumn("timestamp_with_precision", DataTypes.TIMESTAMP(3))
                         .physicalColumn("timestamp_ltz", DataTypes.TIMESTAMP_LTZ())
                         .physicalColumn("timestamp_ltz_with_precision", DataTypes.TIMESTAMP_LTZ(3))
+                        .physicalColumn("variant", DataTypes.VARIANT())
                         .primaryKey("col1")
                         .build();
         CreateTableEvent createTableEvent =

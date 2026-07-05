@@ -20,9 +20,13 @@ package org.apache.flink.cdc.common.utils;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.cdc.common.annotation.PublicEvolving;
 import org.apache.flink.cdc.common.annotation.VisibleForTesting;
+import org.apache.flink.cdc.common.converter.JavaObjectConverter;
+import org.apache.flink.cdc.common.data.ArrayData;
 import org.apache.flink.cdc.common.data.DateData;
 import org.apache.flink.cdc.common.data.DecimalData;
 import org.apache.flink.cdc.common.data.LocalZonedTimestampData;
+import org.apache.flink.cdc.common.data.MapData;
+import org.apache.flink.cdc.common.data.RecordData;
 import org.apache.flink.cdc.common.data.StringData;
 import org.apache.flink.cdc.common.data.TimeData;
 import org.apache.flink.cdc.common.data.TimestampData;
@@ -59,9 +63,10 @@ import org.apache.flink.cdc.common.types.TimestampType;
 import org.apache.flink.cdc.common.types.TinyIntType;
 import org.apache.flink.cdc.common.types.VarBinaryType;
 import org.apache.flink.cdc.common.types.VarCharType;
+import org.apache.flink.cdc.common.types.VariantType;
 import org.apache.flink.cdc.common.types.ZonedTimestampType;
+import org.apache.flink.cdc.common.types.variant.Variant;
 
-import org.apache.flink.shaded.guava31.com.google.common.collect.ArrayListMultimap;
 import org.apache.flink.shaded.guava31.com.google.common.collect.ImmutableList;
 import org.apache.flink.shaded.guava31.com.google.common.collect.Streams;
 import org.apache.flink.shaded.guava31.com.google.common.io.BaseEncoding;
@@ -204,6 +209,7 @@ public class SchemaMergingUtils {
 
         Map<String, DataType> oldTypeMapping = new HashMap<>();
         Map<String, DataType> newTypeMapping = new HashMap<>();
+        Map<String, String> comments = new HashMap<>();
         List<AddColumnEvent.ColumnWithPosition> appendedColumns = new ArrayList<>();
 
         String afterWhichColumnPosition = null;
@@ -231,6 +237,9 @@ public class SchemaMergingUtils {
                 }
             }
             afterWhichColumnPosition = afterColumn.getName();
+            if (afterColumn.getComment() != null) {
+                comments.put(columnName, afterColumn.getComment());
+            }
         }
 
         List<SchemaChangeEvent> schemaChangeEvents = new ArrayList<>();
@@ -240,7 +249,7 @@ public class SchemaMergingUtils {
 
         if (!newTypeMapping.isEmpty()) {
             schemaChangeEvents.add(
-                    new AlterColumnTypeEvent(tableId, newTypeMapping, oldTypeMapping));
+                    new AlterColumnTypeEvent(tableId, newTypeMapping, oldTypeMapping, comments));
         }
 
         if (!beforeColumns.isEmpty()) {
@@ -316,139 +325,6 @@ public class SchemaMergingUtils {
             }
         }
         return coercedRow;
-    }
-
-    /**
-     * Try to merge given {@link Schema}s and ensure they're identical. The only difference allowed
-     * is nullability, string and varchar precision, default value, and comments.
-     */
-    public static Schema strictlyMergeSchemas(List<Schema> schemas) {
-        Preconditions.checkArgument(
-                !schemas.isEmpty(), "Trying to merge transformed schemas %s, but got empty list");
-        if (schemas.size() == 1) {
-            return schemas.get(0);
-        }
-
-        List<List<String>> primaryKeys =
-                schemas.stream()
-                        .map(Schema::primaryKeys)
-                        .filter(p -> !p.isEmpty())
-                        .distinct()
-                        .collect(Collectors.toList());
-        List<List<String>> partitionKeys =
-                schemas.stream()
-                        .map(Schema::partitionKeys)
-                        .filter(p -> !p.isEmpty())
-                        .distinct()
-                        .collect(Collectors.toList());
-        List<Map<String, String>> options =
-                schemas.stream()
-                        .map(Schema::options)
-                        .filter(p -> !p.isEmpty())
-                        .distinct()
-                        .collect(Collectors.toList());
-        List<List<String>> columnNames =
-                schemas.stream()
-                        .map(Schema::getColumnNames)
-                        .distinct()
-                        .collect(Collectors.toList());
-
-        Preconditions.checkArgument(
-                primaryKeys.size() <= 1,
-                "Trying to merge transformed schemas %s, but got more than one primary key configurations: %s",
-                schemas,
-                primaryKeys);
-        Preconditions.checkArgument(
-                partitionKeys.size() <= 1,
-                "Trying to merge transformed schemas %s, but got more than one partition key configurations: %s",
-                schemas,
-                partitionKeys);
-        Preconditions.checkArgument(
-                options.size() <= 1,
-                "Trying to merge transformed schemas %s, but got more than one option configurations: %s",
-                schemas,
-                options);
-        Preconditions.checkArgument(
-                columnNames.size() == 1,
-                "Trying to merge transformed schemas %s, but got more than one column name views: %s",
-                schemas,
-                columnNames);
-
-        int arity = columnNames.get(0).size();
-
-        ArrayListMultimap<Integer, DataType> toBeMergedColumnTypes =
-                ArrayListMultimap.create(arity, 1);
-        for (Schema schema : schemas) {
-            List<DataType> columnTypes = schema.getColumnDataTypes();
-            for (int colIndex = 0; colIndex < columnTypes.size(); colIndex++) {
-                toBeMergedColumnTypes.put(colIndex, columnTypes.get(colIndex));
-            }
-        }
-
-        List<String> mergedColumnNames = columnNames.iterator().next();
-        List<DataType> mergedColumnTypes = new ArrayList<>(arity);
-        for (int i = 0; i < arity; i++) {
-            mergedColumnTypes.add(strictlyMergeDataTypes(toBeMergedColumnTypes.get(i)));
-        }
-
-        List<Column> mergedColumns = new ArrayList<>();
-        for (int i = 0; i < mergedColumnNames.size(); i++) {
-            mergedColumns.add(
-                    Column.physicalColumn(mergedColumnNames.get(i), mergedColumnTypes.get(i)));
-        }
-
-        return Schema.newBuilder()
-                .primaryKey(primaryKeys.isEmpty() ? Collections.emptyList() : primaryKeys.get(0))
-                .partitionKey(
-                        partitionKeys.isEmpty() ? Collections.emptyList() : partitionKeys.get(0))
-                .options(options.isEmpty() ? Collections.emptyMap() : options.get(0))
-                .setColumns(mergedColumns)
-                .build();
-    }
-
-    private static DataType strictlyMergeDataTypes(List<DataType> dataTypes) {
-        Preconditions.checkArgument(
-                !dataTypes.isEmpty(),
-                "Trying to merge transformed data types %s, but got empty list");
-
-        List<DataType> simpleMergeTypes =
-                dataTypes.stream().distinct().collect(Collectors.toList());
-        if (simpleMergeTypes.size() == 1) {
-            return simpleMergeTypes.get(0);
-        }
-
-        List<DataTypeRoot> typeRoots =
-                dataTypes.stream()
-                        .map(DataType::getTypeRoot)
-                        .distinct()
-                        .collect(Collectors.toList());
-        Preconditions.checkArgument(
-                typeRoots.size() == 1,
-                "Trying to merge types %s, but got more than one type root: %s",
-                dataTypes,
-                typeRoots);
-
-        // Decay types to the most
-        DataType type = dataTypes.get(0);
-
-        if (type.is(DataTypeRoot.CHAR)) {
-            return DataTypes.CHAR(CharType.MAX_LENGTH);
-        } else if (type.is(DataTypeRoot.VARCHAR)) {
-            return DataTypes.STRING();
-        } else if (type.is(DataTypeRoot.BINARY)) {
-            return DataTypes.BINARY(BinaryType.MAX_LENGTH);
-        } else if (type.is(DataTypeRoot.VARBINARY)) {
-            return DataTypes.VARBINARY(VarBinaryType.MAX_LENGTH);
-        } else if (type.is(DataTypeRoot.TIMESTAMP_WITHOUT_TIME_ZONE)) {
-            return DataTypes.TIMESTAMP(TimestampType.MAX_PRECISION);
-        } else if (type.is(DataTypeRoot.TIMESTAMP_WITH_TIME_ZONE)) {
-            return DataTypes.TIMESTAMP_TZ(ZonedTimestampType.MAX_PRECISION);
-        } else if (type.is(DataTypeRoot.TIMESTAMP_WITH_LOCAL_TIME_ZONE)) {
-            return DataTypes.TIMESTAMP_LTZ(LocalZonedTimestampType.MAX_PRECISION);
-        } else {
-            throw new IllegalArgumentException(
-                    "Unable to merge data types with different precision: " + dataTypes);
-        }
     }
 
     @VisibleForTesting
@@ -559,15 +435,7 @@ public class SchemaMergingUtils {
                             lhsDecimal.getPrecision() - lhsDecimal.getScale(),
                             rhsDecimal.getPrecision() - rhsDecimal.getScale());
             int resultScale = Math.max(lhsDecimal.getScale(), rhsDecimal.getScale());
-            Preconditions.checkArgument(
-                    resultIntDigits + resultScale <= DecimalType.MAX_PRECISION,
-                    String.format(
-                            "Failed to merge %s and %s type into DECIMAL. %d precision digits required, %d available",
-                            lType,
-                            rType,
-                            resultIntDigits + resultScale,
-                            DecimalType.MAX_PRECISION));
-            return DataTypes.DECIMAL(resultIntDigits + resultScale, resultScale);
+            return createDecimalBounded(resultIntDigits + resultScale, resultScale);
         } else if (lType instanceof DecimalType && rType.is(DataTypeFamily.EXACT_NUMERIC)) {
             // Merge decimal and int
             return mergeExactNumericsIntoDecimal((DecimalType) lType, rType);
@@ -585,11 +453,7 @@ public class SchemaMergingUtils {
                 Math.max(
                         decimalType.getPrecision(),
                         decimalType.getScale() + getNumericPrecision(otherType));
-        if (resultPrecision <= DecimalType.MAX_PRECISION) {
-            return DataTypes.DECIMAL(resultPrecision, decimalType.getScale());
-        } else {
-            return DataTypes.STRING();
-        }
+        return createDecimalBounded(resultPrecision, decimalType.getScale());
     }
 
     @VisibleForTesting
@@ -613,7 +477,7 @@ public class SchemaMergingUtils {
     }
 
     @VisibleForTesting
-    static Object coerceObject(
+    public static Object coerceObject(
             String timezone,
             Object originalField,
             DataType originalType,
@@ -733,6 +597,16 @@ public class SchemaMergingUtils {
             return BinaryStringData.fromString(hexlify((byte[]) originalField));
         }
 
+        if (originalField instanceof Variant) {
+            return BinaryStringData.fromString(((Variant) originalField).toJson());
+        }
+
+        if (originalField instanceof MapData
+                || originalField instanceof ArrayData
+                || originalField instanceof RecordData) {
+            Object javaObject = JavaObjectConverter.convertToJava(originalField, originalType);
+            return BinaryStringData.fromString(javaObject.toString());
+        }
         return BinaryStringData.fromString(originalField.toString());
     }
 
@@ -1046,6 +920,16 @@ public class SchemaMergingUtils {
         mergingTree.put(RowType.class, ImmutableList.of(stringType));
         mergingTree.put(ArrayType.class, ImmutableList.of(stringType));
         mergingTree.put(MapType.class, ImmutableList.of(stringType));
+        mergingTree.put(VariantType.class, ImmutableList.of(stringType));
         return mergingTree;
+    }
+
+    static DecimalType createDecimalBounded(int precision, int scale) {
+        if (precision > DecimalType.MAX_PRECISION) {
+            int lossDigits = precision - DecimalType.MAX_PRECISION;
+            return DataTypes.DECIMAL(precision - lossDigits, scale - lossDigits);
+        } else {
+            return DataTypes.DECIMAL(precision, scale);
+        }
     }
 }

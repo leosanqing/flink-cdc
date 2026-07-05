@@ -24,14 +24,15 @@ import org.apache.flink.cdc.debezium.utils.ResolvedSchemaUtils;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Schema;
-import org.apache.flink.table.catalog.CatalogTable;
+import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.catalog.CatalogTableAdapter;
 import org.apache.flink.table.catalog.Column;
 import org.apache.flink.table.catalog.ObjectIdentifier;
 import org.apache.flink.table.catalog.ResolvedCatalogTable;
 import org.apache.flink.table.catalog.ResolvedSchema;
 import org.apache.flink.table.catalog.UniqueConstraint;
 import org.apache.flink.table.connector.source.DynamicTableSource;
-import org.apache.flink.table.factories.FactoryUtil;
+import org.apache.flink.table.factories.FactoryUtilAdapter;
 
 import org.assertj.core.api.Assertions;
 import org.junit.jupiter.api.Test;
@@ -251,6 +252,73 @@ class SqlServerTableFactoryTest {
         Assertions.assertThat(actualSource).isEqualTo(expectedSource);
     }
 
+    @Test
+    void testStartupFromTimestamp() {
+        Map<String, String> properties = getAllOptions();
+        properties.put("scan.startup.mode", "timestamp");
+        properties.put("scan.startup.timestamp-millis", "1667232000000");
+        properties.put("scan.incremental.snapshot.enabled", "true");
+
+        DynamicTableSource actualSource = createTableSource(SCHEMA, properties);
+        SqlServerTableSource expectedSource =
+                new SqlServerTableSource(
+                        SCHEMA,
+                        1433,
+                        MY_LOCALHOST,
+                        MY_DATABASE,
+                        MY_TABLE,
+                        ZoneId.of("UTC"),
+                        MY_USERNAME,
+                        MY_PASSWORD,
+                        PROPERTIES,
+                        StartupOptions.timestamp(1667232000000L),
+                        true,
+                        SourceOptions.SCAN_INCREMENTAL_SNAPSHOT_CHUNK_SIZE.defaultValue(),
+                        SourceOptions.CHUNK_META_GROUP_SIZE.defaultValue(),
+                        SourceOptions.SCAN_SNAPSHOT_FETCH_SIZE.defaultValue(),
+                        JdbcSourceOptions.CONNECT_TIMEOUT.defaultValue(),
+                        JdbcSourceOptions.CONNECT_MAX_RETRIES.defaultValue(),
+                        JdbcSourceOptions.CONNECTION_POOL_SIZE.defaultValue(),
+                        JdbcSourceOptions.SPLIT_KEY_EVEN_DISTRIBUTION_FACTOR_UPPER_BOUND
+                                .defaultValue(),
+                        JdbcSourceOptions.SPLIT_KEY_EVEN_DISTRIBUTION_FACTOR_LOWER_BOUND
+                                .defaultValue(),
+                        null,
+                        false,
+                        JdbcSourceOptions.SCAN_INCREMENTAL_SNAPSHOT_BACKFILL_SKIP.defaultValue(),
+                        JdbcSourceOptions.SCAN_INCREMENTAL_SNAPSHOT_UNBOUNDED_CHUNK_FIRST_ENABLED
+                                .defaultValue());
+        Assertions.assertThat(actualSource).isEqualTo(expectedSource);
+    }
+
+    @Test
+    void testTimestampStartupRequiresIncrementalSnapshot() {
+        Map<String, String> properties = getAllOptions();
+        properties.put("scan.startup.mode", "timestamp");
+        properties.put("scan.startup.timestamp-millis", "1667232000000");
+        properties.put("scan.incremental.snapshot.enabled", "false");
+
+        Assertions.assertThatThrownBy(() -> createTableSource(SCHEMA, properties))
+                .isInstanceOf(ValidationException.class)
+                .hasMessageContaining("scan.startup.mode")
+                .hasMessageContaining("timestamp")
+                .hasMessageContaining("scan.incremental.snapshot.enabled");
+    }
+
+    @Test
+    void testTimestampStartupRequiresTimestampMillis() {
+        Map<String, String> properties = getAllOptions();
+        properties.put("scan.startup.mode", "timestamp");
+        properties.put("scan.incremental.snapshot.enabled", "true");
+
+        Assertions.assertThatThrownBy(() -> createTableSource(SCHEMA, properties))
+                .isInstanceOf(ValidationException.class)
+                .hasRootCauseInstanceOf(ValidationException.class)
+                .rootCause()
+                .hasMessageContaining("scan.startup.timestamp-millis")
+                .hasMessageContaining("must be set");
+    }
+
     private Map<String, String> getAllOptions() {
         Map<String, String> options = new HashMap<>();
         options.put("connector", "sqlserver-cdc");
@@ -268,11 +336,11 @@ class SqlServerTableFactoryTest {
 
     private static DynamicTableSource createTableSource(
             ResolvedSchema schema, Map<String, String> options) {
-        return FactoryUtil.createTableSource(
+        return FactoryUtilAdapter.createTableSource(
                 null,
                 ObjectIdentifier.of("default", "default", "t1"),
                 new ResolvedCatalogTable(
-                        CatalogTable.of(
+                        CatalogTableAdapter.of(
                                 Schema.newBuilder().fromResolvedSchema(schema).build(),
                                 "mock source",
                                 new ArrayList<>(),

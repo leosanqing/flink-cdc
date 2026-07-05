@@ -19,7 +19,6 @@ package org.apache.flink.cdc.connectors.postgres.utils;
 
 import org.apache.flink.cdc.common.types.DataType;
 import org.apache.flink.cdc.common.types.DataTypes;
-import org.apache.flink.cdc.common.types.ZonedTimestampType;
 import org.apache.flink.table.types.logical.DecimalType;
 
 import io.debezium.config.CommonConnectorConfig;
@@ -159,6 +158,7 @@ public class PostgresTypeUtils {
             case PgOid.DATERANGE_OID:
                 return DataTypes.STRING();
             case PgOid.TEXT_ARRAY:
+            case PgOid.UUID_ARRAY:
                 return DataTypes.ARRAY(DataTypes.STRING());
             case PgOid.TIMESTAMP:
                 return handleTimestampWithTemporalMode(temporalPrecisionMode, scale);
@@ -166,9 +166,9 @@ public class PostgresTypeUtils {
                 return DataTypes.ARRAY(
                         handleTimestampWithTemporalMode(temporalPrecisionMode, scale));
             case PgOid.TIMESTAMPTZ:
-                return new ZonedTimestampType(scale);
+                return DataTypes.TIMESTAMP_LTZ(scale);
             case PgOid.TIMESTAMPTZ_ARRAY:
-                return DataTypes.ARRAY(new ZonedTimestampType(scale));
+                return DataTypes.ARRAY(DataTypes.TIMESTAMP_LTZ(scale));
             case PgOid.TIME:
                 return handleTimeWithTemporalMode(temporalPrecisionMode, scale);
             case PgOid.TIME_ARRAY:

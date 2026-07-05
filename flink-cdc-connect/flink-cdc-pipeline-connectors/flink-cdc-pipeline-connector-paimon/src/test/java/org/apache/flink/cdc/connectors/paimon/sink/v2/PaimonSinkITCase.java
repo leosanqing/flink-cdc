@@ -28,7 +28,8 @@ import org.apache.flink.api.common.serialization.SerializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.connector.sink2.Committer;
-import org.apache.flink.api.connector.sink2.Sink;
+import org.apache.flink.api.connector.sink2.CommitterInitContext;
+import org.apache.flink.api.connector.sink2.WriterInitContext;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.cdc.common.configuration.Configuration;
 import org.apache.flink.cdc.common.data.binary.BinaryRecordData;
@@ -44,7 +45,6 @@ import org.apache.flink.cdc.common.event.SchemaChangeEventTypeFamily;
 import org.apache.flink.cdc.common.event.TableId;
 import org.apache.flink.cdc.common.event.TruncateTableEvent;
 import org.apache.flink.cdc.common.exceptions.SchemaEvolveException;
-import org.apache.flink.cdc.common.exceptions.UnsupportedSchemaChangeEventException;
 import org.apache.flink.cdc.common.factories.DataSinkFactory;
 import org.apache.flink.cdc.common.factories.FactoryHelper;
 import org.apache.flink.cdc.common.pipeline.SchemaChangeBehavior;
@@ -67,6 +67,7 @@ import org.apache.flink.cdc.connectors.paimon.sink.v2.bucket.BucketAssignOperato
 import org.apache.flink.cdc.runtime.operators.sink.SchemaEvolutionClient;
 import org.apache.flink.cdc.runtime.typeutils.BinaryRecordDataGenerator;
 import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.metrics.groups.SinkCommitterMetricGroup;
 import org.apache.flink.metrics.groups.SinkWriterMetricGroup;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.metrics.groups.InternalSinkCommitterMetricGroup;
@@ -113,10 +114,11 @@ import static org.apache.flink.cdc.common.pipeline.PipelineOptions.DEFAULT_SCHEM
 import static org.apache.flink.cdc.common.types.DataTypes.INT;
 import static org.apache.flink.cdc.common.types.DataTypes.STRING;
 import static org.apache.flink.cdc.common.types.DataTypes.VARCHAR;
-import static org.apache.flink.configuration.ConfigConstants.DEFAULT_PARALLELISM;
 
 /** An ITCase for {@link PaimonWriter} and {@link PaimonCommitter}. */
 public class PaimonSinkITCase {
+
+    public static final int DEFAULT_PARALLELISM = 1;
 
     @TempDir public static java.nio.file.Path temporaryFolder;
 
@@ -131,7 +133,7 @@ public class PaimonSinkITCase {
     private final TableId table1 = TableId.tableId("test", "table1");
     private final TableId table2 = TableId.tableId("test", "table2");
 
-    private static int checkpointId = 1;
+    private int checkpointId = 1;
 
     public static final String TEST_DATABASE = "test";
     private static final String HADOOP_CONF_DIR =
@@ -278,7 +280,8 @@ public class PaimonSinkITCase {
                 new PaimonSink<>(
                         catalogOptions, new PaimonRecordEventSerializer(ZoneId.systemDefault()));
         PaimonWriter<Event> writer = paimonSink.createWriter(new MockInitContext());
-        Committer<MultiTableCommittable> committer = paimonSink.createCommitter();
+        Committer<MultiTableCommittable> committer =
+                paimonSink.createCommitter(new MockCommitterInitContext());
 
         // insert
         writeAndCommit(
@@ -339,7 +342,8 @@ public class PaimonSinkITCase {
                 new PaimonSink<>(
                         catalogOptions, new PaimonRecordEventSerializer(ZoneId.systemDefault()));
         PaimonWriter<Event> writer = paimonSink.createWriter(new MockInitContext());
-        Committer<MultiTableCommittable> committer = paimonSink.createCommitter();
+        Committer<MultiTableCommittable> committer =
+                paimonSink.createCommitter(new MockCommitterInitContext());
 
         // insert
         writeAndCommit(
@@ -404,7 +408,8 @@ public class PaimonSinkITCase {
                 new PaimonSink<>(
                         catalogOptions, new PaimonRecordEventSerializer(ZoneId.systemDefault()));
         PaimonWriter<Event> writer = paimonSink.createWriter(new MockInitContext());
-        Committer<MultiTableCommittable> committer = paimonSink.createCommitter();
+        Committer<MultiTableCommittable> committer =
+                paimonSink.createCommitter(new MockCommitterInitContext());
 
         // 1. receive only DataChangeEvents during one checkpoint
         writeAndCommit(
@@ -483,18 +488,8 @@ public class PaimonSinkITCase {
                         Row.ofKind(RowKind.INSERT, "6", "6"));
 
         TruncateTableEvent truncateTableEvent = new TruncateTableEvent(table1);
-        if (enableDeleteVector) {
-            Assertions.assertThatThrownBy(
-                            () -> metadataApplier.applySchemaChange(truncateTableEvent))
-                    .isExactlyInstanceOf(SchemaEvolveException.class)
-                    .cause()
-                    .isExactlyInstanceOf(UnsupportedSchemaChangeEventException.class)
-                    .extracting("exceptionMessage")
-                    .isEqualTo("Unable to truncate a table with deletion vectors enabled.");
-        } else {
-            metadataApplier.applySchemaChange(truncateTableEvent);
-            Assertions.assertThat(fetchResults(table1)).isEmpty();
-        }
+        metadataApplier.applySchemaChange(truncateTableEvent);
+        Assertions.assertThat(fetchResults(table1)).isEmpty();
 
         DropTableEvent dropTableEvent = new DropTableEvent(table1);
         metadataApplier.applySchemaChange(dropTableEvent);
@@ -519,7 +514,8 @@ public class PaimonSinkITCase {
                 new PaimonSink<>(
                         catalogOptions, new PaimonRecordEventSerializer(ZoneId.systemDefault()));
         PaimonWriter<Event> writer = paimonSink.createWriter(new MockInitContext());
-        Committer<MultiTableCommittable> committer = paimonSink.createCommitter();
+        Committer<MultiTableCommittable> committer =
+                paimonSink.createCommitter(new MockCommitterInitContext());
         BucketAssignOperator bucketAssignOperator =
                 new BucketAssignOperator(catalogOptions, null, ZoneId.systemDefault(), null);
         SchemaEvolutionClient schemaEvolutionClient = Mockito.mock(SchemaEvolutionClient.class);
@@ -730,7 +726,8 @@ public class PaimonSinkITCase {
                 new PaimonSink<>(
                         catalogOptions, new PaimonRecordEventSerializer(ZoneId.systemDefault()));
         PaimonWriter<Event> writer = paimonSink.createWriter(new MockInitContext());
-        Committer<MultiTableCommittable> committer = paimonSink.createCommitter();
+        Committer<MultiTableCommittable> committer =
+                paimonSink.createCommitter(new MockCommitterInitContext());
         List<Event> testEvents = createTestEvents(enableDeleteVector);
         // create table
         Schema schema =
@@ -759,18 +756,17 @@ public class PaimonSinkITCase {
                 .containsExactlyInAnyOrder(Row.ofKind(RowKind.INSERT, "1", "1"));
     }
 
-    private static void commit(
-            PaimonWriter<Event> writer, Committer<MultiTableCommittable> committer)
+    private void commit(PaimonWriter<Event> writer, Committer<MultiTableCommittable> committer)
             throws IOException, InterruptedException {
         Collection<Committer.CommitRequest<MultiTableCommittable>> commitRequests =
                 writer.prepareCommit().stream()
-                        .map(PaimonSinkITCase::correctCheckpointId)
+                        .map(this::correctCheckpointId)
                         .map(MockCommitRequestImpl::new)
                         .collect(Collectors.toList());
         committer.commit(commitRequests);
     }
 
-    private static void writeAndCommit(
+    private void writeAndCommit(
             PaimonWriter<Event> writer, Committer<MultiTableCommittable> committer, Event... events)
             throws IOException, InterruptedException {
         for (Event event : events) {
@@ -780,7 +776,7 @@ public class PaimonSinkITCase {
         commit(writer, committer);
     }
 
-    private static void writeAndCommit(
+    private void writeAndCommit(
             BucketAssignOperator bucketAssignOperator,
             PaimonWriter<Event> writer,
             Committer<MultiTableCommittable> committer,
@@ -861,7 +857,8 @@ public class PaimonSinkITCase {
                 new PaimonSink<>(
                         catalogOptions, new PaimonRecordEventSerializer(ZoneId.systemDefault()));
         PaimonWriter<Event> writer = paimonSink.createWriter(new MockInitContext());
-        Committer<MultiTableCommittable> committer = paimonSink.createCommitter();
+        Committer<MultiTableCommittable> committer =
+                paimonSink.createCommitter(new MockCommitterInitContext());
 
         // insert
         for (Event event : createTestEvents(enableDeleteVector)) {
@@ -870,7 +867,7 @@ public class PaimonSinkITCase {
         writer.flush(false);
         Collection<Committer.CommitRequest<MultiTableCommittable>> commitRequests =
                 writer.prepareCommit().stream()
-                        .map(PaimonSinkITCase::correctCheckpointId)
+                        .map(this::correctCheckpointId)
                         .map(MockCommitRequestImpl::new)
                         .collect(Collectors.toList());
         committer.commit(commitRequests);
@@ -902,7 +899,7 @@ public class PaimonSinkITCase {
             // Checkpoint id start from 1
             committer.commit(
                     writer.prepareCommit().stream()
-                            .map(PaimonSinkITCase::correctCheckpointId)
+                            .map(this::correctCheckpointId)
                             .map(MockCommitRequestImpl::new)
                             .collect(Collectors.toList()));
         }
@@ -1041,14 +1038,13 @@ public class PaimonSinkITCase {
         env.execute("runJobWithEvents").getJobExecutionResult();
     }
 
-    private static MultiTableCommittable correctCheckpointId(MultiTableCommittable committable) {
+    private MultiTableCommittable correctCheckpointId(MultiTableCommittable committable) {
         // update the right checkpointId for MultiTableCommittable
         return new MultiTableCommittable(
                 committable.getDatabase(),
                 committable.getTable(),
                 checkpointId++,
-                committable.kind(),
-                committable.wrappedCommittable());
+                committable.commitMessage());
     }
 
     private static class MockCommitRequestImpl<CommT> extends CommitRequestImpl<CommT> {
@@ -1062,7 +1058,7 @@ public class PaimonSinkITCase {
     }
 
     private static class MockInitContext
-            implements Sink.InitContext, SerializationSchema.InitializationContext {
+            implements WriterInitContext, SerializationSchema.InitializationContext {
 
         private MockInitContext() {}
 
@@ -1126,7 +1122,31 @@ public class PaimonSinkITCase {
 
         @Override
         public TaskInfo getTaskInfo() {
+            return new TaskInfoImpl("test-task", 1, 0, 1, 0);
+        }
+    }
+
+    private static class MockCommitterInitContext implements CommitterInitContext {
+
+        @Override
+        public SinkCommitterMetricGroup metricGroup() {
+            return InternalSinkCommitterMetricGroup.wrap(
+                    UnregisteredMetricsGroup.createOperatorMetricGroup());
+        }
+
+        @Override
+        public OptionalLong getRestoredCheckpointId() {
+            return OptionalLong.empty();
+        }
+
+        @Override
+        public JobInfo getJobInfo() {
             return null;
+        }
+
+        @Override
+        public TaskInfo getTaskInfo() {
+            return new TaskInfoImpl("test-task", 1, 0, 1, 0);
         }
     }
 }

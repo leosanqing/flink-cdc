@@ -119,8 +119,7 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
             SourceSplitSerializer sourceSplitSerializer,
             DataSourceDialect<C> dialect) {
         super(
-                elementQueue,
-                new SingleThreadFetcherManager<>(elementQueue, splitReaderSupplier::get),
+                new SingleThreadFetcherManager<>(splitReaderSupplier::get),
                 recordEmitter,
                 config,
                 incrementalSourceReaderContext.getSourceReaderContext());
@@ -143,6 +142,9 @@ public class IncrementalSourceReader<T, C extends SourceConfig>
 
     @Override
     protected SourceSplitState initializedState(SourceSplitBase split) {
+        if (recordEmitter instanceof IncrementalSourceRecordEmitter) {
+            ((IncrementalSourceRecordEmitter<?>) recordEmitter).applySplit(split);
+        }
         if (split.isSnapshotSplit()) {
             return new SnapshotSplitState(split.asSnapshotSplit());
         } else {

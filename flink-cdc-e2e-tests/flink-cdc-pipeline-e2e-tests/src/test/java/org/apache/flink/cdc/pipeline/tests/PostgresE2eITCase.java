@@ -116,12 +116,14 @@ public class PostgresE2eITCase extends PipelineTestEnvironment {
                                 + "  scan.startup.mode: initial\n"
                                 + "  server-time-zone: UTC\n"
                                 + "  connect.timeout: 120s\n"
+                                + "  schema-change.enabled: true\n"
                                 + "\n"
                                 + "sink:\n"
                                 + "  type: values\n"
                                 + "\n"
                                 + "pipeline:\n"
-                                + "  parallelism: %d",
+                                + "  parallelism: %d\n"
+                                + "  schema.change.behavior: evolve",
                         INTER_CONTAINER_POSTGRES_ALIAS,
                         5432,
                         POSTGRES_TEST_USER,
@@ -142,16 +144,16 @@ public class PostgresE2eITCase extends PipelineTestEnvironment {
                 "DataChangeEvent{tableId=%s.customers, before=[], after=[103, Edward, Walker, ed@walker.com], op=INSERT, meta=()}",
                 "DataChangeEvent{tableId=%s.customers, before=[], after=[102, George, Bailey, gbailey@foobar.com], op=INSERT, meta=()}",
                 "DataChangeEvent{tableId=%s.customers, before=[], after=[101, Sally, Thomas, sally.thomas@acme.com], op=INSERT, meta=()}",
-                "CreateTableEvent{tableId=%s.products, schema=columns={`id` INT NOT NULL 'nextval('inventory.products_id_seq'::regclass)',`name` VARCHAR(255) NOT NULL,`description` VARCHAR(512),`weight` FLOAT}, primaryKeys=id, options=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[109, spare tire, 24 inch spare tire, 22.2], op=INSERT, meta=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[107, rocks, box of assorted rocks, 5.3], op=INSERT, meta=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[108, jacket, water resistent black wind breaker, 0.1], op=INSERT, meta=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[105, hammer, 14oz carpenter's hammer, 0.875], op=INSERT, meta=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[106, hammer, 16oz carpenter's hammer, 1.0], op=INSERT, meta=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[103, 12-pack drill bits, 12-pack of drill bits with sizes ranging from #40 to #3, 0.8], op=INSERT, meta=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[104, hammer, 12oz carpenter's hammer, 0.75], op=INSERT, meta=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[101, scooter, Small 2-wheel scooter, 3.14], op=INSERT, meta=()}",
-                "DataChangeEvent{tableId=%s.products, before=[], after=[102, car battery, 12V car battery, 8.1], op=INSERT, meta=()}");
+                "CreateTableEvent{tableId=%s.products, schema=columns={`id` INT NOT NULL 'nextval('inventory.products_id_seq'::regclass)',`name` VARCHAR(255) NOT NULL,`description` VARCHAR(512),`weight` FLOAT,`created_at` TIMESTAMP_LTZ(6)}, primaryKeys=id, options=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[109, spare tire, 24 inch spare tire, 22.2, 2024-01-09T18:00], op=INSERT, meta=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[107, rocks, box of assorted rocks, 5.3, 2024-01-07T16:45], op=INSERT, meta=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[108, jacket, water resistent black wind breaker, 0.1, 2024-01-08T17:00], op=INSERT, meta=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[105, hammer, 14oz carpenter's hammer, 0.875, 2024-01-05T14:20], op=INSERT, meta=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[106, hammer, 16oz carpenter's hammer, 1.0, 2024-01-06T15:30], op=INSERT, meta=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[103, 12-pack drill bits, 12-pack of drill bits with sizes ranging from #40 to #3, 0.8, 2024-01-03T12:00], op=INSERT, meta=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[104, hammer, 12oz carpenter's hammer, 0.75, 2024-01-04T13:15], op=INSERT, meta=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[101, scooter, Small 2-wheel scooter, 3.14, 2024-01-01T10:00], op=INSERT, meta=()}",
+                "DataChangeEvent{tableId=%s.products, before=[], after=[102, car battery, 12V car battery, 8.1, 2024-01-02T11:30], op=INSERT, meta=()}");
 
         LOG.info("Begin incremental reading stage.");
 
@@ -165,12 +167,54 @@ public class PostgresE2eITCase extends PipelineTestEnvironment {
 
             // Perform DML changes after the wal log is generated
             waitUntilSpecificEvent(
-                    "DataChangeEvent{tableId=inventory.products, before=[106, hammer, 16oz carpenter's hammer, 1.0], after=[106, hammer, 18oz carpenter hammer, 1.0], op=UPDATE, meta=()}");
+                    "DataChangeEvent{tableId=inventory.products, before=[106, hammer, 16oz carpenter's hammer, 1.0, 2024-01-06T15:30], after=[106, hammer, 18oz carpenter hammer, 1.0, 2024-01-06T15:30], op=UPDATE, meta=()}");
             waitUntilSpecificEvent(
-                    "DataChangeEvent{tableId=inventory.products, before=[107, rocks, box of assorted rocks, 5.3], after=[107, rocks, box of assorted rocks, 5.1], op=UPDATE, meta=()}");
+                    "DataChangeEvent{tableId=inventory.products, before=[107, rocks, box of assorted rocks, 5.3, 2024-01-07T16:45], after=[107, rocks, box of assorted rocks, 5.1, 2024-01-07T16:45], op=UPDATE, meta=()}");
         } catch (Exception e) {
             LOG.error("Update table for CDC failed.", e);
             throw new RuntimeException(e);
         }
+
+        LOG.info("Begin schema change stage.");
+
+        try (Connection conn =
+                        getJdbcConnection(
+                                POSTGRES_CONTAINER, postgresInventoryDatabase.getDatabaseName());
+                Statement stat = conn.createStatement()) {
+            // Test ADD COLUMN
+            stat.execute("ALTER TABLE inventory.products ADD COLUMN category VARCHAR(255);");
+            stat.execute(
+                    "INSERT INTO inventory.products VALUES (default, 'widget', 'A small widget', 1.5, '2024-01-06T15:30+00', 'tools');");
+
+            // Test DROP COLUMN
+            stat.execute("ALTER TABLE inventory.products DROP COLUMN weight;");
+            stat.execute(
+                    "INSERT INTO inventory.products VALUES (default, 'gadget', 'A useful gadget', '2024-01-06T15:30+00', 'electronics');");
+
+            // Test RENAME COLUMN
+            stat.execute(
+                    "ALTER TABLE inventory.products RENAME COLUMN category TO product_category;");
+            stat.execute(
+                    "INSERT INTO inventory.products VALUES (default, 'gizmo', 'A fancy gizmo', '2024-01-06T15:30+00', 'gadgets');");
+        } catch (Exception e) {
+            LOG.error("Schema change test failed.", e);
+            throw new RuntimeException(e);
+        }
+
+        // Validate schema change events and corresponding data
+        waitUntilSpecificEvent(
+                "AddColumnEvent{tableId=inventory.products, addedColumns=[ColumnWithPosition{column=`category` VARCHAR(255), position=LAST, existedColumnName=null}]}");
+        waitUntilSpecificEvent(
+                "DataChangeEvent{tableId=inventory.products, before=[], after=[110, widget, A small widget, 1.5, 2024-01-06T15:30, tools], op=INSERT, meta=()}");
+
+        waitUntilSpecificEvent(
+                "DropColumnEvent{tableId=inventory.products, droppedColumnNames=[weight]}");
+        waitUntilSpecificEvent(
+                "DataChangeEvent{tableId=inventory.products, before=[], after=[111, gadget, A useful gadget, 2024-01-06T15:30, electronics], op=INSERT, meta=()}");
+
+        waitUntilSpecificEvent(
+                "RenameColumnEvent{tableId=inventory.products, nameMapping={category=product_category}}");
+        waitUntilSpecificEvent(
+                "DataChangeEvent{tableId=inventory.products, before=[], after=[112, gizmo, A fancy gizmo, 2024-01-06T15:30, gadgets], op=INSERT, meta=()}");
     }
 }

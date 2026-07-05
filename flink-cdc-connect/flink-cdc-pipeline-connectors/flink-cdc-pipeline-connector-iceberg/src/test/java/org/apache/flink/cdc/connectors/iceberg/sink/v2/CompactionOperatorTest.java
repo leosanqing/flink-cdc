@@ -60,6 +60,7 @@ public class CompactionOperatorTest {
 
     @Test
     public void testCompationOperator() throws IOException, InterruptedException {
+        long checkpointId = 0;
         Map<String, String> catalogOptions = new HashMap<>();
         String warehouse =
                 new File(temporaryFolder.toFile(), UUID.randomUUID().toString()).toString();
@@ -69,8 +70,18 @@ public class CompactionOperatorTest {
         Catalog catalog =
                 CatalogUtil.buildIcebergCatalog(
                         "cdc-iceberg-catalog", catalogOptions, new Configuration());
+        String jobId = UUID.randomUUID().toString();
+        String operatorId = UUID.randomUUID().toString();
         IcebergWriter icebergWriter =
-                new IcebergWriter(catalogOptions, 1, 1, ZoneId.systemDefault());
+                new IcebergWriter(
+                        catalogOptions,
+                        1,
+                        1,
+                        ZoneId.systemDefault(),
+                        checkpointId,
+                        jobId,
+                        operatorId,
+                        new HashMap<>());
         IcebergMetadataApplier icebergMetadataApplier = new IcebergMetadataApplier(catalogOptions);
         TableId tableId = TableId.parse("test.iceberg_table");
 
@@ -124,38 +135,44 @@ public class CompactionOperatorTest {
         BinaryRecordDataGenerator binaryRecordDataGenerator =
                 new BinaryRecordDataGenerator(
                         createTableEvent.getSchema().getColumnDataTypes().toArray(new DataType[0]));
-        IcebergCommitter icebergCommitter = new IcebergCommitter(catalogOptions);
-        // Commit many times.
         int smallFileCount = 100;
-        for (long i = 0; i < smallFileCount; i++) {
-            RecordData recordData =
-                    binaryRecordDataGenerator.generate(
-                            new Object[] {
-                                i,
-                                BinaryStringData.fromString("Mark"),
-                                10,
-                                BinaryStringData.fromString("test"),
-                                true,
-                                1.0f,
-                                1.0d,
-                                DecimalData.fromBigDecimal(new BigDecimal(1.0), 10, 2),
-                                DateData.fromEpochDay(9)
-                            });
-            icebergWriter.write(DataChangeEvent.insertEvent(tableId, recordData), null);
-            Collection<Committer.CommitRequest<WriteResultWrapper>> collection =
-                    icebergWriter.prepareCommit().stream()
-                            .map(IcebergWriterTest.MockCommitRequestImpl::new)
-                            .collect(Collectors.toList());
-            icebergCommitter.commit(collection);
+        try (IcebergCommitter icebergCommitter =
+                new IcebergCommitter(catalogOptions, new HashMap<>())) {
+            // Commit many times.
+            for (long i = 0; i < smallFileCount; i++) {
+                RecordData recordData =
+                        binaryRecordDataGenerator.generate(
+                                new Object[] {
+                                    i,
+                                    BinaryStringData.fromString("Mark"),
+                                    10,
+                                    BinaryStringData.fromString("test"),
+                                    true,
+                                    1.0f,
+                                    1.0d,
+                                    DecimalData.fromBigDecimal(new BigDecimal(1.0), 10, 2),
+                                    DateData.fromEpochDay(9)
+                                });
+                icebergWriter.write(DataChangeEvent.insertEvent(tableId, recordData), null);
+                Collection<Committer.CommitRequest<WriteResultWrapper>> collection =
+                        icebergWriter.prepareCommit().stream()
+                                .map(IcebergWriterTest.MockCommitRequestImpl::new)
+                                .collect(Collectors.toList());
+                icebergCommitter.commit(collection);
+            }
         }
         CompactionOperator compactionOperator =
                 new CompactionOperator(
                         catalogOptions,
-                        CompactionOptions.builder().commitInterval(1).parallelism(4).build());
+                        CompactionOptions.builder().commitInterval(1).parallelism(4).build(),
+                        new HashMap<>());
         compactionOperator.processElement(
                 new StreamRecord<>(
                         new CommittableWithLineage<>(
-                                new WriteResultWrapper(null, tableId), 0L, 0)));
+                                new WriteResultWrapper(
+                                        null, tableId, checkpointId, jobId, operatorId),
+                                0L,
+                                0)));
         Map<String, String> summary =
                 catalog.loadTable(TableIdentifier.parse(tableId.identifier()))
                         .currentSnapshot()

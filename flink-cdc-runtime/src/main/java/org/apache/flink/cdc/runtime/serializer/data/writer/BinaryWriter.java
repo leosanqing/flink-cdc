@@ -29,15 +29,22 @@ import org.apache.flink.cdc.common.data.StringData;
 import org.apache.flink.cdc.common.data.TimeData;
 import org.apache.flink.cdc.common.data.TimestampData;
 import org.apache.flink.cdc.common.data.ZonedTimestampData;
+import org.apache.flink.cdc.common.data.binary.BinaryRecordData;
 import org.apache.flink.cdc.common.types.DataType;
 import org.apache.flink.cdc.common.types.DecimalType;
 import org.apache.flink.cdc.common.types.LocalZonedTimestampType;
+import org.apache.flink.cdc.common.types.RowType;
 import org.apache.flink.cdc.common.types.TimeType;
 import org.apache.flink.cdc.common.types.TimestampType;
 import org.apache.flink.cdc.common.types.ZonedTimestampType;
+import org.apache.flink.cdc.common.types.variant.Variant;
+import org.apache.flink.cdc.common.utils.Preconditions;
 import org.apache.flink.cdc.runtime.serializer.NullableSerializerWrapper;
 import org.apache.flink.cdc.runtime.serializer.data.ArrayDataSerializer;
 import org.apache.flink.cdc.runtime.serializer.data.MapDataSerializer;
+import org.apache.flink.cdc.runtime.typeutils.BinaryRecordDataGenerator;
+
+import java.util.List;
 
 /**
  * Writer to write a composite data format, like row, array. 1. Invoke {@link #reset()}. 2. Write
@@ -88,6 +95,8 @@ public interface BinaryWriter {
     void writeDate(int pos, DateData value);
 
     void writeTime(int pos, TimeData value, int precision);
+
+    void writeVariant(int pos, Variant variant);
 
     /** Finally, complete write to set real size to binary. */
     void complete();
@@ -168,11 +177,32 @@ public interface BinaryWriter {
                 writer.writeMap(pos, (MapData) o, (MapDataSerializer) serializer);
                 break;
             case ROW:
-                writer.writeRecord(pos, (RecordData) o, (TypeSerializer<RecordData>) serializer);
+                RecordData recordData = (RecordData) o;
+                if (!(recordData instanceof BinaryRecordData)) {
+                    RowType rowType = (RowType) type;
+                    List<DataType> childTypes = rowType.getChildren();
+                    int arity = recordData.getArity();
+                    Preconditions.checkArgument(
+                            arity == childTypes.size(),
+                            "RecordData arity (%s) does not match row type field count (%s)",
+                            arity,
+                            childTypes.size());
+                    Object[] fields = new Object[arity];
+                    for (int i = 0; i < arity; i++) {
+                        fields[i] =
+                                RecordData.createFieldGetter(childTypes.get(i), i)
+                                        .getFieldOrNull(recordData);
+                    }
+                    recordData = new BinaryRecordDataGenerator(rowType).generate(fields);
+                }
+                writer.writeRecord(pos, recordData, (TypeSerializer<RecordData>) serializer);
                 break;
             case BINARY:
             case VARBINARY:
                 writer.writeBinary(pos, (byte[]) o);
+                break;
+            case VARIANT:
+                writer.writeVariant(pos, (Variant) o);
                 break;
             default:
                 throw new UnsupportedOperationException("Not support type: " + type);

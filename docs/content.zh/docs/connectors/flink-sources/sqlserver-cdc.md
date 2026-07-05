@@ -41,7 +41,7 @@ In order to setup the SQLServer CDC connector, the following table provides depe
 
 ```Download link is available only for stable releases.```
 
-Download [flink-sql-connector-sqlserver-cdc-{{< param Version >}}.jar](https://repo1.maven.org/maven2/org/apache/flink/flink-sql-connector-sqlserver-cdc/{{< param Version >}}/flink-sql-connector-sqlserver-cdc-{{< param Version >}}.jar) and put it under `<FLINK_HOME>/lib/`.
+Download [flink-sql-connector-sqlserver-cdc](https://mvnrepository.com/artifact/org.apache.flink/flink-sql-connector-sqlserver-cdc) and put it under `<FLINK_HOME>/lib/`.
 
 **Note:** Refer to [flink-sql-connector-sqlserver-cdc](https://mvnrepository.com/artifact/org.apache.flink/flink-sql-connector-sqlserver-cdc), more released versions will be available in the Maven central warehouse.
 
@@ -308,6 +308,9 @@ Limitation
 --------
 
 ### Can't perform checkpoint during scanning snapshot of tables
+
+*注意：此限制仅在未启用增量快照框架（即 `scan.incremental.snapshot.enabled` 设置为 `false`）时适用。*
+
 During scanning snapshot of database tables, since there is no recoverable position, we can't perform checkpoints. In order to not perform checkpoints, SqlServer CDC source will keep the checkpoint waiting to timeout. The timeout checkpoint will be recognized as failed checkpoint, by default, this will trigger a failover for the Flink job. So if the database table is large, it is recommended to add following Flink configurations to avoid failover because of the timeout checkpoints:
 
 ```
@@ -530,8 +533,8 @@ Data Type Mapping
       <td>DECIMAL(p, s)</td>
     </tr>
     <tr>
-      <td>numeric</td>
-      <td>NUMERIC</td>
+      <td>numeric(p, s)</td>
+      <td>DECIMAL(p, s)</td>
     </tr>
     <tr>
       <td>
