@@ -17,6 +17,8 @@
 
 package org.apache.flink.cdc.pipeline.tests;
 
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.time.Deadline;
 import org.apache.flink.cdc.common.test.utils.TestUtils;
 import org.apache.flink.cdc.pipeline.tests.utils.PipelineTestEnvironment;
 
@@ -26,6 +28,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.testcontainers.containers.Container.ExecResult;
 import org.testcontainers.containers.MSSQLServerContainer;
 import org.testcontainers.containers.output.Slf4jLogConsumer;
 import org.testcontainers.junit.jupiter.Container;
@@ -42,6 +45,8 @@ import java.sql.Statement;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -108,8 +113,8 @@ public class SqlServerE2eITCase extends PipelineTestEnvironment {
                         SQL_SERVER_CONTAINER.getPassword(),
                         parallelism);
         Path sqlServerCdcJar = TestUtils.getResource("sqlserver-cdc-pipeline-connector.jar");
-        submitPipelineJob(pipelineJob, sqlServerCdcJar);
-        waitUntilJobRunning(Duration.ofSeconds(30));
+        JobID jobId = submitPipelineJob(pipelineJob, sqlServerCdcJar);
+        waitUntilJobRunningFromClusterCli(jobId, Duration.ofSeconds(30));
         LOG.info("Pipeline job is running");
 
         validateResult(
@@ -126,11 +131,24 @@ public class SqlServerE2eITCase extends PipelineTestEnvironment {
 
         LOG.info("Begin incremental reading stage.");
 
+        waitUntilStreamSplitReady(jobId, parallelism, "for the stream split assignment.");
+
         try (Connection conn = getSqlServerJdbcConnection();
                 Statement stat = conn.createStatement()) {
             stat.execute("USE inventory;");
             stat.execute(
                     "INSERT INTO dbo.products(id,name,description,weight) VALUES (110,'jacket','water resistent white wind breaker',0.2);");
+        } catch (SQLException e) {
+            LOG.error("Insert row for CDC failed.", e);
+            throw e;
+        }
+
+        waitUntilSpecificEvent(
+                "DataChangeEvent{tableId=inventory.dbo.products, before=[], after=[110, jacket, water resistent white wind breaker, 0.2], op=INSERT, meta=()}");
+
+        try (Connection conn = getSqlServerJdbcConnection();
+                Statement stat = conn.createStatement()) {
+            stat.execute("USE inventory;");
             stat.execute(
                     "UPDATE dbo.products SET description='18oz carpenter hammer' WHERE id=106;");
             stat.execute("UPDATE dbo.products SET weight=5.1 WHERE id=107;");
@@ -139,9 +157,6 @@ public class SqlServerE2eITCase extends PipelineTestEnvironment {
             LOG.error("Update table for CDC failed.", e);
             throw e;
         }
-
-        waitUntilSpecificEvent(
-                "DataChangeEvent{tableId=inventory.dbo.products, before=[], after=[110, jacket, water resistent white wind breaker, 0.2], op=INSERT, meta=()}");
         waitUntilSpecificEvent(
                 "DataChangeEvent{tableId=inventory.dbo.products, before=[106, hammer, 16oz carpenter's hammer, 1.0], after=[106, hammer, 18oz carpenter hammer, 1.0], op=UPDATE, meta=()}");
         waitUntilSpecificEvent(
@@ -183,5 +198,19 @@ public class SqlServerE2eITCase extends PipelineTestEnvironment {
                 SQL_SERVER_CONTAINER.getJdbcUrl(),
                 SQL_SERVER_CONTAINER.getUsername(),
                 SQL_SERVER_CONTAINER.getPassword());
+    }
+
+    private void waitUntilJobRunningFromClusterCli(JobID jobId, Duration timeout) throws Exception {
+        Deadline deadline = Deadline.fromNow(timeout);
+        String jobIdHex = jobId.toHexString();
+        while (deadline.hasTimeLeft()) {
+            ExecResult execResult = jobManager.execInContainer("bash", "-lc", "flink list");
+            if (execResult.getExitCode() == 0 && execResult.getStdout().contains(jobIdHex)) {
+                return;
+            }
+            TimeUnit.SECONDS.sleep(1);
+        }
+        throw new TimeoutException(
+                String.format("Timed out waiting for job %s to appear in `flink list`.", jobIdHex));
     }
 }
